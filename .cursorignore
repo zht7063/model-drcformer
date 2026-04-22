@@ -1,0 +1,11 @@
+# 忽略 voc2012 数据集
+voc2012/
+pre-weights/
+outputs/
+**/__pycache__/
+
+
+# 忽略 drcformer 以外的全部内容
+outputs/
+pre-weights/
+voc2012/

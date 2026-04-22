@@ -1,0 +1,84 @@
+# =========================
+# Python / general
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs
+.venv/
+venv/
+env/
+.env/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Test / type / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.coverage
+coverage.xml
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Deep learning artifacts
+# =========================
+# Checkpoints / weights
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+
+# Serialized artifacts / caches
+*.pkl
+*.pkl.gz
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# Training outputs / logs
+runs/
+tensorboard/
+lightning_logs/
+wandb/
+mlruns/
+logs/
+log/
+
+# Common output folders
+outputs/
+output/
+checkpoints/
+checkpoint/
+weights/
+
+# =========================
+# Data (keep datasets out of git)
+# =========================
+data/
+dataset/
+datasets/
+
+# =========================
+# Editor / OS
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
