@@ -5,6 +5,8 @@
 torch==2.5.1+cu121
 torchvision==0.20.1+cu121
 torchaudio==2.5.1+cu121
+# torch-scatter 需要从 PyG 的 wheel 源安装（PyPI/默认 index 常不可用或不匹配）：
+#   pip install "torch-scatter==2.1.2+pt25cu121" -f https://data.pyg.org/whl/torch-2.5.0+cu121.html
 torch-scatter==2.1.2+pt25cu121
 
 # CUDA 支持库（CUDA 12.1）
@@ -40,7 +42,10 @@ matplotlib==3.10.6
 
 # 超像素处理
 fast-slic==0.4.0
-pydensecrf==1.0
+# pydensecrf==1.0 在 PyPI 不存在；推荐使用 conda-forge 预编译包：
+#   conda install -c conda-forge --override-channels pydensecrf -y
+# 若必须走 pip，请自行选择可用的 1.0rc* 版本并处理编译依赖。
+pydensecrf==1.0rc3
 
 # 工具库
 tqdm==4.67.1
@@ -58,6 +63,9 @@ cmapy==0.6.6
 visdom==0.2.4
 websocket-client==1.9.0
 wcwidth==0.2.14
+
+# PSA 分支依赖
+imageio==2.37.3
 
 # 可选依赖（用于开发和调试）
 # jupyter

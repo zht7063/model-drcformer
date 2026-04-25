@@ -1,148 +1,43 @@
-# 命令备忘
+## 运行前注意事项（py310）
 
-## 消融实验
+### 训练入口与工作目录
 
-只启动 Baseline+RCP（关闭 SNS 和 DCC 模块），进行完整训练：
+- `src/drcformer/main.py` 使用了 `from datasets import ...`、`from engine import ...` 这类相对导入，**需要在 `src/drcformer/` 目录下运行**，否则会出现导入失败或导入到错误模块的情况。
 
-当 amp 参数为 (0.04, 0.06) 的时候，最高 miou 为 73.09%，目的是达到 75 左右。
-
-目前大约 75~76 左右。
-
-```shell
-cd src/drcformer/
-python run_drcformer.py --all \
---exp_id neo_baseline_rcp \
---cuda 0 \
---w_ent 0 \
---w_neg 0 \
---w_lsp 0 \
---num_sp_tokens 196 \
---cam_amp_alpha 0.06 \
---cam_amp_beta 0.08
-```
-
-启动 Baseline+RCP+DCC 执行完整流程（开启 DCC，关闭 SNS）：77.093%
-
-```shell
-cd src/drcformer/
-python run_drcformer.py --all \
---exp_id neo_baseline_rcp_dcc \
---cuda 0 \
---w_ent 0 \
---w_neg 0 \
---w_lsp 750 \
---num_sp_tokens 196 \
---cam_amp_alpha 0.05 \
---cam_amp_beta 0.06
-```
-
-启动 Baseline+RCP+SNS 执行完整流程（开启 SNS，关闭 DCC）：75.546%
-
-```shell
-cd src/drcformer/
-python run_drcformer.py --all \
---exp_id neo_baseline_rcp_sns \
---cuda 0 \
---w_ent 0.01 \
---w_neg 0.01 \
---w_lsp 0 \
---num_sp_tokens 196 \
---cam_amp_alpha 0.05 \
---cam_amp_beta 0.07
-```
-
-启动 Baseline+RCP+DCC+SNS，即完全体 DRCFormer 进行完整流程：75.952%
-
-```shell
-cd src/drcformer/
-python run_drcformer.py --all \
---exp_id drcformer_full \
---cuda 0 \
---w_ent 0.01 \
---w_neg 0.01 \
---w_lsp 750 \
---num_sp_tokens 196 \
---cam_amp_alpha 0.06 \
---cam_amp_beta 0.09
-```
-
-## 快速命令
-
-指定 cuda 进行 drcformer 完整流程
+示例：
 
 ```bash
-cd src/drcformer/ \
-python run_drcformer.py --all --cuda 1
+conda activate py310
+cd /home/ubuntu/projects/drcformer/src/drcformer
+python main.py --help
 ```
 
-额外指定超像素数量（下面是标准状态）：
+### VOC2012Aug 数据与列表文件
+
+- VOC 根目录（含 `JPEGImages/`, `Annotations/`, `SegmentationClassAug/` 等）在：
+  - `/home/ubuntu/projects/datasets/voc2012aug`
+- 图像列表与分类标签（需包含 `train_aug_id.txt` / `val_id.txt` / `cls_labels.npy`）在：
+  - `/home/ubuntu/projects/datasets/voc2012aug/voc12`
+
+训练时建议显式指定：
 
 ```bash
-cd src/drcformer/ \
-
-python run_drcformer.py --all \
---num_sp_tokens 196 \
---draw_sp_boundaries \
---exp_id sp_64 \
---cuda 1 \
---cam_amp_alpha 0.06 \
---cam_amp_beta 0.08
-
+python main.py \
+  --data-path /home/ubuntu/projects/datasets/voc2012aug \
+  --img-list /home/ubuntu/projects/datasets/voc2012aug/voc12
 ```
 
-alpha 是增强比例，beta 是减弱比例
+### DINO 超像素（sp_idx）路径
 
-## 超像素数量基准实验
+`datasets.py` 会在训练阶段根据 `--sp_idx_dir` 去读取 `"{img_id}.npy"`。如果 `sp_idx_dir` 配错，会出现日志：
+`[VOC12Dataset] DINO superpixel missing ...`，这通常是**路径不匹配**而不是数据真的缺失。
 
-超像素数量系列实验一共包括五轮实验：
+- DINO 超像素文件目录为：
+  - `/home/ubuntu/projects/outputs/drcformer/sp_idx/dino/npy`
 
-1、超像素数量 64 实验；
-2、超像素数量 128 实验；
-3、超像素数量 196 实验；
-4、超像素数量 256 实验；
-5、超像素数量 512 实验；
-
-由于实际用于展示的时候可能不会放很多行，所以优先 2、3、4 三组实验。
-
-- num_sp_128
-
-为了凸显该数量下效果弱于 196，略微降低了图像增强参数，下面是启动命令：
+训练时建议显式指定：
 
 ```bash
-python run_drcformer.py --all \
---num_sp_tokens 128 \
---draw_sp_boundaries \
---exp_id num_sp_128 \
---cuda 5 \
---cam_amp_alpha 0.03 \
---cam_amp_beta 0.04
+python main.py \
+  --sp_idx_dir /home/ubuntu/projects/outputs/drcformer/sp_idx/dino/npy
 ```
-
-- num_sp_196
-
-标准的 196 超像素实验：
-
-```bash
-python run_drcformer.py --all \
---num_sp_tokens 196 \
---draw_sp_boundaries \
---exp_id num_sp_196 \
---cuda 4
---cam_amp_alpha 0.04 \
---cam_amp_beta 0.06
-```
-
-- num_sp_256
-
-扩展的的 256 超像素实验：
-
-```bash
-python run_drcformer.py --all \
---num_sp_tokens 256 \
---draw_sp_boundaries \
---exp_id num_sp_256_no_edge \
---cuda 4 \
---cam_amp_alpha 0.03 \
---cam_amp_beta 0.04
-```
-
