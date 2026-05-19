@@ -74,6 +74,7 @@ datasets/
 # =========================
 # Editor / OS
 # =========================
+CLAUDE.local.md
 .vscode/
 .idea/
 *.swp
