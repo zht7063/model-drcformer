@@ -143,7 +143,8 @@ validation: 1024x2048
 ### 1. Requirements
 
 ```bash
-pip install -r requirements.txt
+cd ../../prepare_env && bash install.sh
+conda activate py310
 ```
 
 ### 2. Prepare Datasets

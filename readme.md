@@ -1,3 +1,15 @@
+## 环境安装（py310）
+
+推荐使用 `prepare_env/` 一键复现当前开发环境：
+
+```bash
+cd prepare_env
+bash install.sh
+conda activate py310
+```
+
+详见 [`prepare_env/README.md`](prepare_env/README.md)。
+
 ## 运行前注意事项（py310）
 
 ### 训练入口与工作目录

@@ -1,0 +1,13 @@
+# DRCFormer py310 conda 基座（可移植）
+# 与 pip.lock + install.sh 配合使用，完整复现 py310 环境
+name: py310
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10.20
+  - pytorch-cuda=12.1
+  - pydensecrf=1.0rc3
+  - pip>=26.0

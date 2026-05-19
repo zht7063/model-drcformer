@@ -1,0 +1,6 @@
+# 已在 install.sh 前几步单独安装的包，安装 pip.lock 时跳过
+torch
+torchvision
+torchaudio
+torch-scatter
+pydensecrf
