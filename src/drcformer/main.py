@@ -252,7 +252,11 @@ def get_args_parser():
     )
 
     # * Finetuning params
-    parser.add_argument("--finetune", default="", help="finetune from checkpoint")
+    parser.add_argument(
+        "--finetune",
+        default=str(Path.home() / "projects" / "pre-weights" / "suit_base_224.pth"),
+        help="finetune from checkpoint",
+    )
 
     # Dataset parameters
     parser.add_argument(
@@ -648,12 +652,12 @@ def main(args):
         plt.figure(figsize=(10, 6))
         
         # Plot two curves
-        plt.plot(epochs, entropy_pos, 'b-o', label=r'$\bar{H}$ (Positive Avg Entropy)', linewidth=2, markersize=6)
-        plt.plot(epochs, pmax_neg, 'r-s', label=r'$\bar{P}_{max}^{-}$ (Negative Max Response)', linewidth=2, markersize=6)
+        plt.plot(epochs, entropy_pos, 'b-o', label='Positive Mean Entropy', linewidth=2, markersize=6)
+        plt.plot(epochs, pmax_neg, 'r-s', label='Negative Mean Max Response', linewidth=2, markersize=6)
         
         plt.xlabel('Epoch', fontsize=12)
         plt.ylabel('Value', fontsize=12)
-        plt.title('Validation Metrics: Positive Entropy Mean and Negative Max Response', fontsize=14)
+        plt.title('SNS Validation Metrics Comparison', fontsize=14)
         plt.legend(fontsize=11)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()

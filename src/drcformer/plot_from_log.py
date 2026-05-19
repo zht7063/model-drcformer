@@ -67,13 +67,13 @@ def plot_metrics(epochs, entropy_pos, pmax_neg, output_path, show_map=False, map
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
         
         # 第一个子图：熵和负类响应
-        ax1.plot(epochs, entropy_pos, 'b-o', label=r'$\bar{H}$ (Positive Avg Entropy)', 
+        ax1.plot(epochs, entropy_pos, 'b-o', label='Positive Mean Entropy', 
                 linewidth=2, markersize=6)
-        ax1.plot(epochs, pmax_neg, 'r-s', label=r'$\bar{P}_{max}^{-}$ (Negative Max Response)', 
+        ax1.plot(epochs, pmax_neg, 'r-s', label='Negative Mean Max Response', 
                 linewidth=2, markersize=6)
         ax1.set_xlabel('Epoch', fontsize=12)
         ax1.set_ylabel('Value', fontsize=12)
-        ax1.set_title('Validation Metrics: Positive Entropy Mean and Negative Max Response', fontsize=14)
+        ax1.set_title('SNS Validation Metrics Comparison', fontsize=14)
         ax1.legend(fontsize=11)
         ax1.grid(True, alpha=0.3)
         
@@ -89,13 +89,13 @@ def plot_metrics(epochs, entropy_pos, pmax_neg, output_path, show_map=False, map
     else:
         # 单个图：只显示熵和负类响应
         plt.figure(figsize=(10, 6))
-        plt.plot(epochs, entropy_pos, 'b-o', label=r'$\bar{H}$ (Positive Avg Entropy)', 
+        plt.plot(epochs, entropy_pos, 'b-o', label='Positive Mean Entropy', 
                 linewidth=2, markersize=6)
-        plt.plot(epochs, pmax_neg, 'r-s', label=r'$\bar{P}_{max}^{-}$ (Negative Max Response)', 
+        plt.plot(epochs, pmax_neg, 'r-s', label='Negative Mean Max Response', 
                 linewidth=2, markersize=6)
         plt.xlabel('Epoch', fontsize=12)
         plt.ylabel('Value', fontsize=12)
-        plt.title('Validation Metrics: Positive Entropy Mean and Negative Max Response', fontsize=14)
+        plt.title('SNS Validation Metrics Comparison', fontsize=14)
         plt.legend(fontsize=11)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()

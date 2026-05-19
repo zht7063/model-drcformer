@@ -50,7 +50,7 @@ def benchmark_original(num_images=20):
 
 def benchmark_batch(num_images=20, batch_size=8, num_workers=4):
     """测试批量优化版本"""
-    from generate_sp_batch import run_generation_batch
+    from generate_sp import run_generation_batch
     from pathlib import Path
     
     class Args:

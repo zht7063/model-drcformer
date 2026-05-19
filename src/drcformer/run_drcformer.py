@@ -88,14 +88,20 @@ class DRCformerRunner:
                 self.num_gpus = 1
         
         # 数据集路径
-        self.dataset_path = self.base / "voc2012"
-        self.img_list_dir = self.base / "voc2012" / "voc12"
+        dataset_path = Path(args.dataset_path).expanduser()
+        if not dataset_path.is_absolute():
+            dataset_path = self.base / dataset_path
+        self.dataset_path = dataset_path
+        self.img_list_dir = self.dataset_path / "voc12"
         self.train_id_list = self.img_list_dir / "train_aug_id.txt"
         self.val_id_list = self.img_list_dir / "val_id.txt"
         
         # 超像素和预训练权重
-        self.sp_idx_dir = self.base / "outputs" / "dino_sp" / "npy"
-        self.pretrained_weight = self.base / "pre-weights" / "suit_base_224.pth"
+        self.sp_idx_dir = self.base / "outputs" / "drcformer" / "sp_idx" / "dino" / "npy"
+        pretrained_weight = Path(args.pretrained_weight).expanduser()
+        if not pretrained_weight.is_absolute():
+            pretrained_weight = self.base / pretrained_weight
+        self.pretrained_weight = pretrained_weight
         
         # 输出路径
         self.output_dir = self.base / "outputs" / "drcformer" / self.exp_id
@@ -280,7 +286,15 @@ class DRCformerRunner:
             print(f"✗ CAM结果不存在: {cam_npy_dir}")
             return False
         
-        gt_dir = self.base / "voc2012" / "SegmentationClass"
+        # 默认优先使用当前 dataset_path 下的增强标注目录，避免依赖固定路径 ~/projects/voc2012
+        gt_candidates = [
+            self.dataset_path / "SegmentationClassAug",
+            self.dataset_path / "SegmentationClass",
+            self.base / "voc2012" / "SegmentationClassAug",
+            self.base / "voc2012" / "SegmentationClass",
+        ]
+        gt_dir = next((p for p in gt_candidates if p.exists()), gt_candidates[0])
+        print(f"评估 GT 目录: {gt_dir}")
         logfile = self.output_dir / "evallog_train_aug.txt"
         
         cmd = [
@@ -343,6 +357,18 @@ def main():
     parser.add_argument("--device", default="cuda:0", help="单GPU模式下使用的设备 (默认: cuda:0)")
     parser.add_argument("--num_gpus", type=int, default=1, help="使用的GPU数量，>1时启用DDP分布式训练 (默认: 1)")
     parser.add_argument("--cuda", help="指定 CUDA 设备编号 (如: 0 或 0,1)。指定后将自动覆盖 --device 和 --num_gpus")
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        default=str(Path.home() / "projects" / "datasets"),
+        help="VOC 数据集路径（默认: ~/projects/datasets）",
+    )
+    parser.add_argument(
+        "--pretrained_weight",
+        type=str,
+        default=str(Path.home() / "projects" / "pre-weights" / "suit_base_224.pth"),
+        help="预训练权重路径（默认: ~/projects/pre-weights/suit_base_224.pth）",
+    )
     
     # 训练超参数
     parser.add_argument("--batch_size", type=int, default=64, help="批次大小 (默认: 64)")
