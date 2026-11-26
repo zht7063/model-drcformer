@@ -1,0 +1,4 @@
+[submodule "ref/model_rgrp"]
+	path = ref/model_rgrp
+	url = https://github.com/zht7063/model_rgrp.git
+	branch = done/software_copyright
