@@ -13,19 +13,8 @@ import {
   resultViews,
 } from "./params";
 
-// Page structure follows the user manual: “参数配置” then “语义分割”.
-const pages = {
-  config: {
-    title: "参数配置",
-    description: "选择待分割图像，配置模型与推理参数，确认后进入语义分割。",
-    icon: "◈",
-  },
-  segment: {
-    title: "语义分割",
-    description: "核对参数列表，执行分割并对比原图与模型输出。",
-    icon: "▦",
-  },
-};
+// Page structure follows the user manual (figs. 4.1, 4.2): two tabs, “参数配置” then “语义分割”.
+const pages = { config: "参数配置", segment: "语义分割" };
 const activePage = ref("config");
 const stageNames = { slic: "超像素分割", cam: "模型注意力图" };
 const attentionNames = { fused: "融合（fused）", patchcam: "PatchCAM", mct: "MCT" };
@@ -172,7 +161,7 @@ function resetAll() {
 function confirmData() {
   if (locked.value) return;
   try {
-    if (!connected.value) throw new Error("请先通过左下角“服务连接”连接服务。");
+    if (!connected.value) throw new Error("请先通过右上角“服务连接”连接服务。");
     if (!image.value) throw new Error("请先选择待分割图像。");
     checkImage(image.value, limits.value);
     const params = buildParams(form);
@@ -255,11 +244,18 @@ async function saveAs() {
   }
 }
 
-function megabytes(bytes) {
-  return `${(bytes / 1048576).toFixed(2)} MB`;
-}
 function expiry(seconds) {
   return new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false });
+}
+function paramSummary(p) {
+  return [
+    `尺度 ${formatScales(p.scales)}`,
+    p.flip ? "翻转" : "不翻转",
+    `${attentionNames[p.attention_type]} L${p.layer_index}`,
+    `阈值 ${p.cls_threshold}/${p.bg_threshold}`,
+    p.patch_attn_refine ? "亲和力细化" : "无细化",
+    p.crf ? `CRF×${p.crf_iters}` : "无 CRF",
+  ].join(" · ");
 }
 
 let unlistenDrop = null;
@@ -277,231 +273,186 @@ onBeforeUnmount(() => unlistenDrop?.());
 </script>
 
 <template>
-  <div class="shell">
-    <aside class="rail">
-      <div class="rail-label">弱监督语义分割</div>
-      <nav aria-label="功能导航">
+  <div class="window">
+    <h1 class="app-title">Weakly Supervised Semantic Segmentation System</h1>
+
+    <div class="tabbar">
+      <div class="tabs" role="tablist" aria-label="功能页面">
         <button
-          v-for="(page, id) in pages"
+          v-for="(title, id) in pages"
           :key="id"
-          class="nav"
+          role="tab"
+          class="tab"
           :class="{ active: activePage === id }"
-          :aria-current="activePage === id ? 'page' : undefined"
+          :aria-selected="activePage === id"
           @click="activePage = id"
         >
-          <i aria-hidden="true">{{ page.icon }}</i><span>{{ page.title }}</span>
+          {{ title }}
         </button>
-      </nav>
+      </div>
       <button
         class="connection-settings"
         aria-label="服务连接设置"
         aria-haspopup="dialog"
         @click="openSettings"
       >
-        <span aria-hidden="true">⚙</span><span class="settings-label">服务连接</span
-        ><i class="connection-dot" :class="{ online: connected }" aria-hidden="true"></i>
+        <i class="connection-dot" :class="{ online: connected }" aria-hidden="true"></i
+        >{{ connected ? "服务已连接" : "服务连接" }}
       </button>
-      <div class="rail-foot">
-        <span class="dot"></span>
-        {{ model ? `${model.dataset} · ${model.classes.length} 类语义标签` : "未加载模型" }}
-      </div>
-    </aside>
+    </div>
 
-    <main>
-      <header>
-        <div>
-          <p class="eyebrow">WEAKLY SUPERVISED SEMANTIC SEGMENTATION SYSTEM</p>
-          <h1>{{ pages[activePage].title }}<span class="version">v1.0</span></h1>
-          <p class="muted">{{ pages[activePage].description }}</p>
+    <!-- 参数配置（图 4.1 / 4.4 / 4.5）：左侧配置参数，右侧预览图片 -->
+    <div v-show="activePage === 'config'" class="tab-pane config-page" role="tabpanel">
+      <fieldset class="group config-group">
+        <legend>配置参数</legend>
+        <div class="form-row path-row">
+          <span>输入图片路径：</span>
+          <input class="mono" readonly :value="image?.path || ''" aria-label="输入图片路径" />
         </div>
-        <span class="pill" :class="{ online: connected }">{{
-          connected ? "服务已连接" : "服务未连接"
-        }}</span>
-      </header>
-
-      <div class="feedback" aria-live="polite">
-        <p v-if="error" class="error" role="alert">{{ error }}</p>
-        <p v-else>{{ notice || "请先通过左下角“服务连接”填写服务地址与访问密钥。" }}</p>
-      </div>
-
-      <!-- 参数配置 -->
-      <div v-show="activePage === 'config'" class="workspace-grid">
-        <section class="panel input-panel">
-          <div class="section-heading">
-            <h2>输入与参数</h2>
-            <span>01 / PARAMS</span>
-          </div>
-          <div class="action-row">
-            <button class="primary" :disabled="locked" @click="chooseImage">选择图像</button>
-            <button :disabled="locked" @click="resetAll">重置</button>
-          </div>
-          <label class="field">
-            <span>输入图片路径</span>
-            <input class="mono" readonly :value="image?.path || ''" placeholder="尚未选择图像" />
-          </label>
-
-          <div class="options">
-            <h3>模型 <span>由服务端提供</span></h3>
-            <label class="field">
-              <span>分割模型</span>
-              <select v-model="modelId" :disabled="locked || !connected">
-                <option v-if="!service" value="">请先连接服务</option>
-                <option v-for="m in service?.models || []" :key="m.id" :value="m.id">
-                  {{ m.id }}{{ m.id === service.default_model ? "（默认）" : "" }}
-                </option>
-              </select>
-            </label>
-            <p v-if="model" class="muted model-meta">
-              {{ model.dataset }} · {{ model.classes.length }} 类 · 超像素数
-              {{ model.num_sp_tokens }} · 紧凑度 10 ·
-              <span class="mono">{{ model.checkpoint_sha256.slice(0, 12) }}</span>
-            </p>
-          </div>
-
-          <div class="options">
-            <h3>附加分析 <span>可选</span></h3>
+        <div class="button-row">
+          <button :disabled="locked" @click="chooseImage">选择图片</button>
+          <button :disabled="locked" @click="resetAll">重置图片</button>
+        </div>
+        <label class="form-row">
+          <span>选择分割模型：</span>
+          <select v-model="modelId" :disabled="locked || !connected">
+            <option v-if="!service" value="">请先连接服务</option>
+            <option v-for="m in service?.models || []" :key="m.id" :value="m.id">
+              {{ m.id }}{{ m.id === service.default_model ? "（默认）" : "" }}
+            </option>
+          </select>
+        </label>
+        <div class="form-row">
+          <span>附加分析：</span>
+          <div class="checks">
             <label v-for="stage in ['slic', 'cam']" :key="stage">
               <input
                 type="checkbox"
                 :value="stage"
                 v-model="include"
                 :disabled="locked || !stageAvailable(stage)"
-              /><span>{{ stageNames[stage] }}</span
-              ><small>{{ stageAvailable(stage) ? "辅助节点" : "未配置" }}</small>
+              />{{ stageNames[stage] }}{{ stageAvailable(stage) ? "" : "（未配置）" }}
             </label>
           </div>
+        </div>
+        <div class="form-row short">
+          <span>超像素数量（由模型决定）：</span>
+          <input readonly :value="model?.num_sp_tokens ?? ''" aria-label="超像素数量" />
+        </div>
+        <div class="form-row short">
+          <span>超像素紧凑度：</span>
+          <input readonly :value="model ? 10 : ''" aria-label="超像素紧凑度" />
+        </div>
 
-          <div class="options">
-            <h3>
-              推理参数 <span>默认值与训练脚本一致</span>
-              <button class="link-button" :disabled="locked" @click="applyDefaults">恢复默认</button>
-            </h3>
-            <div class="param-grid">
-              <label class="field">
-                <span>多尺度</span>
-                <input v-model="form.scales" :disabled="locked" placeholder="1.0, 0.75, 1.25" />
-              </label>
-              <label class="field">
-                <span>注意力类型</span>
-                <select v-model="form.attention_type" :disabled="locked">
-                  <option v-for="t in ATTENTION_TYPES" :key="t" :value="t">
-                    {{ attentionNames[t] }}
-                  </option>
-                </select>
-              </label>
-              <label class="field">
-                <span>注意力层数</span>
-                <input type="number" min="1" max="12" step="1" v-model.number="form.layer_index" :disabled="locked" />
-              </label>
-              <label class="field">
-                <span>CRF 迭代次数</span>
-                <input
-                  type="number"
-                  min="1"
-                  max="20"
-                  step="1"
-                  v-model.number="form.crf_iters"
-                  :disabled="locked || !form.crf"
-                />
-              </label>
-              <label class="field">
-                <span>类别阈值 <b class="mono">{{ Number(form.cls_threshold).toFixed(2) }}</b></span>
-                <input type="range" min="0" max="1" step="0.01" v-model.number="form.cls_threshold" :disabled="locked" />
-              </label>
-              <label class="field">
-                <span>背景阈值 <b class="mono">{{ Number(form.bg_threshold).toFixed(2) }}</b></span>
-                <input type="range" min="0" max="1" step="0.01" v-model.number="form.bg_threshold" :disabled="locked" />
-              </label>
-            </div>
-            <label><input type="checkbox" v-model="form.flip" :disabled="locked" /><span>水平翻转增强</span></label>
-            <label
-              ><input type="checkbox" v-model="form.patch_attn_refine" :disabled="locked" /><span
-                >超像素亲和力细化</span
-              ></label
-            >
-            <label><input type="checkbox" v-model="form.crf" :disabled="locked" /><span>DenseCRF 后处理</span></label>
-          </div>
-
-          <button class="primary run" :disabled="locked || !image || !connected" @click="confirmData">
-            确认数据 <span>→</span>
-          </button>
-        </section>
-
-        <section class="panel result-panel">
-          <div class="section-heading">
-            <h2>输入图像预览</h2>
-            <span>{{ image ? `${image.width} × ${image.height}` : "02 / PREVIEW" }}</span>
-          </div>
-          <div class="upload preview-area">
-            <img v-if="image" :src="image.data_url" alt="输入图像预览" class="preview-image" />
-            <div v-else class="upload-empty">
-              <span class="upload-icon" aria-hidden="true">↥</span>
-              <h3>选择一张待分割图像</h3>
-              <p>拖放图像到窗口，或点击左侧“选择图像”</p>
+        <details class="advanced">
+          <summary>
+            推理参数<span>默认值与训练脚本一致</span>
+            <button class="link-button" :disabled="locked" @click.prevent="applyDefaults">
+              恢复默认
+            </button>
+          </summary>
+          <label class="form-row">
+            <span>多尺度：</span>
+            <input v-model="form.scales" :disabled="locked" placeholder="1.0, 0.75, 1.25" />
+          </label>
+          <label class="form-row">
+            <span>注意力类型：</span>
+            <select v-model="form.attention_type" :disabled="locked">
+              <option v-for="t in ATTENTION_TYPES" :key="t" :value="t">{{ attentionNames[t] }}</option>
+            </select>
+          </label>
+          <label class="form-row short">
+            <span>注意力层数：</span>
+            <input type="number" min="1" max="12" step="1" v-model.number="form.layer_index" :disabled="locked" />
+          </label>
+          <label class="form-row">
+            <span>类别阈值：<b class="mono">{{ Number(form.cls_threshold).toFixed(2) }}</b></span>
+            <input type="range" min="0" max="1" step="0.01" v-model.number="form.cls_threshold" :disabled="locked" />
+          </label>
+          <label class="form-row">
+            <span>背景阈值：<b class="mono">{{ Number(form.bg_threshold).toFixed(2) }}</b></span>
+            <input type="range" min="0" max="1" step="0.01" v-model.number="form.bg_threshold" :disabled="locked" />
+          </label>
+          <div class="form-row">
+            <span>增强与后处理：</span>
+            <div class="checks">
+              <label><input type="checkbox" v-model="form.flip" :disabled="locked" />水平翻转</label>
+              <label><input type="checkbox" v-model="form.patch_attn_refine" :disabled="locked" />亲和力细化</label>
+              <label><input type="checkbox" v-model="form.crf" :disabled="locked" />DenseCRF</label>
             </div>
           </div>
-          <div class="result-summary">
-            <span>{{ image ? image.name : "JPEG / PNG / WebP · 单帧图片" }}</span>
-            <span>{{
-              image
-                ? `${megabytes(image.bytes)} · ${image.mime}`
-                : limits
-                  ? `最大 ${(limits.max_upload_bytes / 1048576).toFixed(1)} MB · ${limits.max_pixels.toLocaleString("zh-CN")} 像素`
-                  : "连接后显示服务限制"
-            }}</span>
-          </div>
-        </section>
-      </div>
+          <label class="form-row short">
+            <span>CRF 迭代次数：</span>
+            <input
+              type="number"
+              min="1"
+              max="20"
+              step="1"
+              v-model.number="form.crf_iters"
+              :disabled="locked || !form.crf"
+            />
+          </label>
+        </details>
 
-      <!-- 语义分割 -->
-      <div v-show="activePage === 'segment'" class="segment-page">
-        <p v-if="!confirmed" class="panel page-empty">
-          尚未确认参数。请前往
-          <button class="link-button" @click="activePage = 'config'">参数配置</button>
-          选择图像并点击“确认数据”。
-        </p>
+        <button class="primary confirm" :disabled="locked || !image || !connected" @click="confirmData">
+          确认数据
+        </button>
+      </fieldset>
+
+      <fieldset class="group preview-group">
+        <legend>预览图片</legend>
+        <img v-if="image" :src="image.data_url" alt="输入图片预览" class="preview-image" />
+        <p v-else class="placeholder">输入图片预览</p>
+      </fieldset>
+    </div>
+
+    <!-- 语义分割（图 4.2 / 4.9 / 4.10）：上方参数列表与执行按钮，下方输出效果展示 -->
+    <div v-show="activePage === 'segment'" class="tab-pane" role="tabpanel">
+      <div class="group segment-frame">
         <div class="segment-top">
-          <section class="panel param-list">
-            <div class="section-heading">
-              <h2>参数列表</h2>
-              <span>LOCKED</span>
+          <fieldset class="group param-list">
+            <legend>参数列表</legend>
+            <div class="list-row">
+              <span>输入图片路径：</span>
+              <input class="mono" readonly :value="confirmed?.image.path || ''" aria-label="输入图片路径" />
             </div>
-            <dl v-if="confirmed">
-              <dt>输入图片路径</dt>
-              <dd class="mono">{{ confirmed.image.path }}</dd>
-              <dt>图片尺寸</dt>
-              <dd>{{ confirmed.image.width }} × {{ confirmed.image.height }}</dd>
-              <dt>分割模型</dt>
-              <dd>{{ confirmed.model.id }} · {{ confirmed.model.dataset }}</dd>
-              <dt>超像素数</dt>
-              <dd>{{ confirmed.model.num_sp_tokens }}（紧凑度 10）</dd>
-              <dt>附加分析</dt>
-              <dd>{{ confirmed.include.map((s) => stageNames[s]).join("、") || "无" }}</dd>
-              <dt>多尺度 / 翻转</dt>
-              <dd>{{ formatScales(confirmed.params.scales) }} · {{ confirmed.params.flip ? "翻转" : "不翻转" }}</dd>
-              <dt>注意力</dt>
-              <dd>{{ attentionNames[confirmed.params.attention_type] }} · 层数 {{ confirmed.params.layer_index }}</dd>
-              <dt>阈值</dt>
-              <dd>类别 {{ confirmed.params.cls_threshold }} · 背景 {{ confirmed.params.bg_threshold }}</dd>
-              <dt>细化 / CRF</dt>
-              <dd>
-                {{ confirmed.params.patch_attn_refine ? "亲和力细化" : "无细化" }} ·
-                {{ confirmed.params.crf ? `CRF ${confirmed.params.crf_iters} 次` : "无 CRF" }}
-              </dd>
-            </dl>
-            <p v-else class="muted">确认数据后在此显示所选参数。</p>
-          </section>
+            <div class="list-row">
+              <span>分割模型：</span>
+              <input
+                readonly
+                :value="confirmed ? `${confirmed.model.id} · ${confirmed.model.dataset}` : ''"
+                aria-label="分割模型"
+              />
+            </div>
+            <div class="list-row">
+              <span>附加分析：</span>
+              <input
+                readonly
+                :value="confirmed ? confirmed.include.map((s) => stageNames[s]).join('、') || '无' : ''"
+                aria-label="附加分析"
+              />
+            </div>
+            <div class="list-row">
+              <span>推理参数：</span>
+              <input
+                readonly
+                :value="confirmed ? paramSummary(confirmed.params) : ''"
+                :title="confirmed ? paramSummary(confirmed.params) : ''"
+                aria-label="推理参数"
+              />
+            </div>
+            <div class="list-row pair">
+              <span>超像素数</span>
+              <input readonly :value="confirmed?.model.num_sp_tokens ?? ''" aria-label="超像素数" />
+              <span>紧凑度：</span>
+              <input readonly :value="confirmed ? 10 : ''" aria-label="紧凑度" />
+            </div>
+          </fieldset>
 
-          <section class="panel run-panel">
-            <div class="section-heading">
-              <h2>执行与导出</h2>
-              <span>{{ resultSummary ? `${resultSummary.duration_ms.toFixed(0)} ms` : "RUN" }}</span>
-            </div>
-            <label class="field">
-              <span>分割结果输出路径</span>
-              <input class="mono" readonly :value="shownOutcome?.cache_dir || ''" placeholder="执行后显示本地缓存路径" />
-            </label>
-            <div class="action-row three">
+          <div class="run-column">
+            <span>分割结果输出路径：</span>
+            <input class="mono" readonly :value="shownOutcome?.cache_dir || ''" aria-label="分割结果输出路径" />
+            <div class="button-row three">
               <button class="primary" :disabled="locked || !confirmed || !connected" @click="run">
                 {{ running ? "正在处理…" : "执行程序" }}
               </button>
@@ -510,152 +461,126 @@ onBeforeUnmount(() => unlistenDrop?.());
                 {{ saving ? "保存中…" : "结果另存为" }}
               </button>
             </div>
-            <div v-if="views.length" class="view-switch" role="group" aria-label="结果视图">
-              <button
-                v-for="(v, i) in views"
-                :key="v.id"
-                :class="{ selected: currentView?.id === v.id }"
-                :aria-pressed="currentView?.id === v.id"
-                :disabled="locked"
-                @click="viewIndex = i"
-              >
-                {{ v.label }}
-              </button>
-            </div>
-            <p v-if="resultSummary" class="muted fingerprint">
-              请求 ID <span class="mono">{{ resultSummary.request_id }}</span> · 服务端结果过期
-              {{ expiry(resultSummary.expires_at) }}
-            </p>
-          </section>
+          </div>
         </div>
 
-        <section class="panel output-panel" :aria-busy="running">
-          <div class="section-heading">
-            <h2>输出结果展示</h2>
-            <span>{{ resultSummary ? `${resultSummary.width} × ${resultSummary.height}` : "OUTPUT" }}</span>
-          </div>
-          <div v-if="shownOutcome" class="compare">
-            <figure>
-              <div class="canvas"><img :src="confirmed.image.data_url" alt="原图" class="result-image" /></div>
-              <figcaption>原图</figcaption>
-            </figure>
-            <figure>
-              <div class="canvas">
+        <hr />
+
+        <section class="output" :aria-busy="running" aria-label="输出效果展示">
+          <template v-if="shownOutcome">
+            <div class="compare">
+              <figure>
+                <img :src="confirmed.image.data_url" alt="原图" />
+                <figcaption>原图</figcaption>
+              </figure>
+              <figure>
                 <img
                   v-if="currentView"
                   :src="currentSrc"
                   :alt="currentView.label"
-                  class="result-image"
                   :class="{ pixelated: currentView.id === 'mask_url' }"
                 />
-              </div>
-              <figcaption>{{ currentView?.label || "无可用预览" }}</figcaption>
-            </figure>
-          </div>
-          <div v-else class="canvas">
-            <div class="empty-output">
-              <span class="crosshair" aria-hidden="true">⌖</span>
-              <h3>{{ running ? "服务器处理中" : "等待执行分割" }}</h3>
-              <p>
-                {{
-                  running
-                    ? "当前可能正在排队或执行推理，相关按钮暂不可用。"
-                    : "执行完毕后，原图与超像素、注意力、分割结果将在此对比展示。"
-                }}
-              </p>
+                <figcaption>
+                  {{ currentView?.label || "无可用预览" }}
+                  <span v-if="views.length">（{{ (viewIndex % views.length) + 1 }}/{{ views.length }}）</span>
+                </figcaption>
+              </figure>
             </div>
-          </div>
-          <div v-if="resultSummary" class="class-list">
-            <div v-for="item in resultSummary.classes" :key="item.id" class="class-row">
-              <i :style="{ background: color(item.id) }"></i
-              ><span
-                >{{ item.name
-                }}<small class="pixel-count">{{ item.pixels.toLocaleString("zh-CN") }} 像素{{
-                  item.score != null ? ` · 分数 ${item.score.toFixed(2)}` : ""
-                }}</small></span
-              >
-              <div class="bar">
-                <span :style="{ width: `${item.area_ratio * 100}%`, background: color(item.id) }"></span>
-              </div>
-              <strong>{{ (item.area_ratio * 100).toFixed(1) }}%</strong>
+            <div class="legend">
+              <span v-for="item in resultSummary.classes" :key="item.id" class="legend-item">
+                <i :style="{ background: color(item.id) }"></i>{{ item.name }}
+                <b class="mono">{{ (item.area_ratio * 100).toFixed(1) }}%</b>
+              </span>
+              <span class="legend-meta">
+                {{ resultSummary.width }} × {{ resultSummary.height }} ·
+                {{ resultSummary.duration_ms.toFixed(0) }} ms · 服务端结果过期
+                {{ expiry(resultSummary.expires_at) }}
+              </span>
             </div>
-          </div>
+          </template>
+          <p v-else class="placeholder">{{ running ? "服务器处理中…" : "输出效果展示" }}</p>
         </section>
       </div>
+    </div>
 
-      <dialog
-        ref="connectionDialog"
-        class="connection-dialog"
-        aria-labelledby="connection-title"
-        @close="showKey = false"
-      >
-        <div class="section-heading">
-          <h2 id="connection-title">服务连接</h2>
-          <button class="close-settings" @click="connectionDialog.close()">关闭</button>
-        </div>
-        <section class="connection">
-          <label class="field">
-            <span>服务地址</span>
+    <footer class="statusbar" aria-live="polite">
+      <p v-if="error" class="error" role="alert">{{ error }}</p>
+      <p v-else>{{ notice || "请先点击右上角“服务连接”填写服务地址与访问密钥。" }}</p>
+      <span>{{ model ? `${model.dataset} · ${model.classes.length} 类语义标签` : "未加载模型" }}</span>
+    </footer>
+
+    <dialog
+      ref="connectionDialog"
+      class="connection-dialog"
+      aria-labelledby="connection-title"
+      @close="showKey = false"
+    >
+      <div class="dialog-heading">
+        <h2 id="connection-title">服务连接</h2>
+        <button class="close-settings" @click="connectionDialog.close()">关闭</button>
+      </div>
+      <section class="connection">
+        <label class="field">
+          <span>服务地址</span>
+          <input
+            class="mono"
+            v-model="baseUrl"
+            :disabled="locked"
+            placeholder="http://127.0.0.1:8000"
+            @input="invalidateConnection"
+          />
+        </label>
+        <div class="field">
+          <label for="api-key">访问密钥</label>
+          <div class="key-input">
             <input
-              class="mono"
-              v-model="baseUrl"
+              id="api-key"
+              :type="showKey ? 'text' : 'password'"
+              v-model="key"
               :disabled="locked"
-              placeholder="http://127.0.0.1:8000"
+              autocomplete="off"
+              placeholder="仅保存在本次运行的内存中"
               @input="invalidateConnection"
-            />
-          </label>
-          <div class="key-field">
-            <label for="api-key">访问密钥</label>
-            <div class="key-input">
-              <input
-                id="api-key"
-                :type="showKey ? 'text' : 'password'"
-                v-model="key"
-                :disabled="locked"
-                autocomplete="off"
-                placeholder="仅保存在本次运行的内存中"
-                @input="invalidateConnection"
-                @keydown.enter="connect"
-              /><button @click="showKey = !showKey" :aria-pressed="showKey">
-                {{ showKey ? "隐藏" : "显示" }}
-              </button>
-            </div>
-          </div>
-          <button class="secondary primary" @click="connect" :disabled="locked">
-            {{ connecting ? "连接中…" : "连接服务" }}
-          </button>
-        </section>
-        <div class="feedback" aria-live="polite">
-          <p v-if="connectionError" class="error">{{ connectionError }}</p>
-          <p v-else-if="connected">
-            已连接，{{ service.models.length }} 个模型可用；上传上限
-            {{ (service.limits.max_upload_bytes / 1048576).toFixed(1) }} MB，结果保留
-            {{ Math.round(service.limits.result_ttl_seconds / 60) }} 分钟。
-          </p>
-          <p v-else>服务地址会保存在本机；访问密钥不落盘，关闭程序后需重新填写。</p>
-        </div>
-        <div v-if="connected" class="model-table">
-          <div v-for="m in service.models" :key="m.id" class="model-row">
-            <strong>{{ m.id }}</strong>
-            <span>{{ m.dataset }} · {{ m.num_sp_tokens }} 超像素</span>
-            <span class="mono">{{ m.checkpoint_sha256.slice(0, 16) }}…</span>
+              @keydown.enter="connect"
+            /><button @click="showKey = !showKey" :aria-pressed="showKey">
+              {{ showKey ? "隐藏" : "显示" }}
+            </button>
           </div>
         </div>
-      </dialog>
+        <button class="primary connect" @click="connect" :disabled="locked">
+          {{ connecting ? "连接中…" : "连接服务" }}
+        </button>
+      </section>
+      <div class="dialog-note" aria-live="polite">
+        <p v-if="connectionError" class="error">{{ connectionError }}</p>
+        <p v-else-if="connected">
+          已连接，{{ service.models.length }} 个模型可用；上传上限
+          {{ (service.limits.max_upload_bytes / 1048576).toFixed(1) }} MB，结果保留
+          {{ Math.round(service.limits.result_ttl_seconds / 60) }} 分钟。
+        </p>
+        <p v-else>服务地址会保存在本机；访问密钥不落盘，关闭程序后需重新填写。</p>
+      </div>
+      <div v-if="connected" class="model-table">
+        <div v-for="m in service.models" :key="m.id" class="model-row">
+          <strong>{{ m.id }}</strong>
+          <span>{{ m.dataset }} · {{ m.num_sp_tokens }} 超像素</span>
+          <span class="mono">{{ m.checkpoint_sha256.slice(0, 16) }}…</span>
+        </div>
+      </div>
+    </dialog>
 
-      <dialog
-        ref="messageDialog"
-        class="connection-dialog message-dialog"
-        aria-labelledby="message-title"
-        @close="onMessageClosed"
-      >
-        <h2 id="message-title">{{ message.title }}</h2>
-        <p :class="{ error: message.isError }">{{ message.body }}</p>
-        <p v-if="message.pending" class="muted">关闭此提示不会取消任务，完成后会再次提示。</p>
-        <div class="dialog-actions">
-          <button class="primary" @click="acknowledge">确定</button>
-        </div>
-      </dialog>
-    </main>
+    <dialog
+      ref="messageDialog"
+      class="connection-dialog message-dialog"
+      aria-labelledby="message-title"
+      @close="onMessageClosed"
+    >
+      <h2 id="message-title">{{ message.title }}</h2>
+      <p :class="{ error: message.isError }">{{ message.body }}</p>
+      <p v-if="message.pending" class="muted">关闭此提示不会取消任务，完成后会再次提示。</p>
+      <div class="dialog-actions">
+        <button class="primary" @click="acknowledge">确定</button>
+      </div>
+    </dialog>
   </div>
 </template>
