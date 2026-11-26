@@ -1,0 +1,6 @@
+# Install on top of the repository's validated model environment (prepare_env, conda py310).
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn==0.53.0
+python-multipart==0.0.32
+httpx>=0.27,<1
