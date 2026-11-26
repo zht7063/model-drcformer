@@ -11,6 +11,8 @@ import {
   color,
   formatScales,
   resultViews,
+  scoreBars,
+  stageTimings,
 } from "./params";
 
 // Page structure follows the user manual (figs. 4.1, 4.2): two tabs, “参数配置” then “语义分割”.
@@ -65,7 +67,17 @@ const currentView = computed(() => views.value[viewIndex.value % (views.value.le
 const currentSrc = computed(() =>
   currentView.value ? convertFileSrc(shownOutcome.value.files[currentView.value.url]) : "",
 );
+const compareSrc = computed(() => {
+  const path = shownOutcome.value?.files[currentView.value?.compare?.url];
+  return path ? convertFileSrc(path) : "";
+});
 const resultSummary = computed(() => shownOutcome.value?.result);
+const scores = computed(() => scoreBars(resultSummary.value));
+const scoreThreshold = computed(() => resultSummary.value?.parameters.cls_threshold ?? 0.5);
+const timings = computed(() => stageTimings(resultSummary.value));
+const confidence = computed(
+  () => resultSummary.value?.stages.segmentation?.data?.confidence || null,
+);
 
 function stageAvailable(stage) {
   return model.value?.stages?.[stage] !== "unavailable";
@@ -468,8 +480,13 @@ onBeforeUnmount(() => unlistenDrop?.());
 
         <section class="output" :aria-busy="running" aria-label="输出效果展示">
           <template v-if="shownOutcome">
+            <div class="output-body">
             <div class="compare">
-              <figure>
+              <figure v-if="compareSrc">
+                <img :src="compareSrc" :alt="currentView.compare.label" />
+                <figcaption>{{ currentView.compare.label }}</figcaption>
+              </figure>
+              <figure v-else>
                 <img :src="confirmed.image.data_url" alt="原图" />
                 <figcaption>原图</figcaption>
               </figure>
@@ -486,10 +503,54 @@ onBeforeUnmount(() => unlistenDrop?.());
                 </figcaption>
               </figure>
             </div>
+            <aside class="insights">
+              <section v-if="scores.length" aria-label="类别置信度">
+                <h2>类别置信度 <small>阈值 {{ scoreThreshold.toFixed(2) }}</small></h2>
+                <div class="score-chart" :style="{ '--threshold': scoreThreshold }">
+                  <div
+                    v-for="item in scores"
+                    :key="item.id"
+                    class="score-row"
+                    :class="{ detected: item.detected }"
+                    :title="`${item.name}：${item.score.toFixed(3)}${item.detected ? '（已检测）' : ''}`"
+                  >
+                    <span class="score-name">{{ item.name }}</span>
+                    <span class="score-track">
+                      <i
+                        :style="{
+                          width: `${item.score * 100}%`,
+                          background: item.detected ? color(item.id) : undefined,
+                        }"
+                      ></i>
+                    </span>
+                    <b class="mono">{{ item.score.toFixed(2) }}</b>
+                  </div>
+                </div>
+              </section>
+              <section v-if="timings.length" aria-label="分阶段耗时">
+                <h2>分阶段耗时 <small>共 {{ resultSummary.duration_ms.toFixed(0) }} ms</small></h2>
+                <div class="timing-row" v-for="t in timings" :key="t.key">
+                  <span>{{ t.label }}</span>
+                  <span class="timing-track">
+                    <i :style="{ width: `${(t.ms / resultSummary.duration_ms) * 100}%` }"></i>
+                  </span>
+                  <b class="mono">{{ t.ms.toFixed(0) }} ms</b>
+                </div>
+              </section>
+            </aside>
+            </div>
             <div class="legend">
               <span v-for="item in resultSummary.classes" :key="item.id" class="legend-item">
                 <i :style="{ background: color(item.id) }"></i>{{ item.name }}
                 <b class="mono">{{ (item.area_ratio * 100).toFixed(1) }}%</b>
+              </span>
+              <span
+                v-if="confidence"
+                class="legend-item"
+                :title="`像素置信度 = 第一、第二候选之差；低于 ${confidence.low_threshold} 视为低置信`"
+              >
+                像素置信度均值 <b class="mono">{{ confidence.mean.toFixed(2) }}</b> · 低置信
+                <b class="mono">{{ (confidence.low_ratio * 100).toFixed(1) }}%</b>
               </span>
               <span class="legend-meta">
                 {{ resultSummary.width }} × {{ resultSummary.height }} ·

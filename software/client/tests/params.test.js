@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildParams, checkImage, color, resultViews } from "../src/params.js";
+import { buildParams, checkImage, color, resultViews, scoreBars, stageTimings } from "../src/params.js";
 
 const form = {
   scales: "1.0, 0.75，1.25",
@@ -64,5 +64,65 @@ test("resultViews lists outputs, SLIC and per-class CAM in display order", () =>
   assert.deepEqual(
     views.map((v) => v.label),
     ["叠加图", "彩色分割", "类别掩码", "超像素边界", "注意力 · dog"],
+  );
+});
+
+test("resultViews adds pixel confidence and pairs each refined CAM with its unrefined CAM", () => {
+  const base = "/api/v1/results/" + "b".repeat(32) + "/";
+  const views = resultViews(
+    {
+      outputs: { mask_url: base + "mask.png", colored_url: base + "colored.png", overlay_url: base + "overlay.png" },
+      stages: {
+        segmentation: { artifacts: { confidence_url: base + "confidence.png" } },
+        cam: {
+          artifacts: {
+            class_12_url: base + "cam-12.png",
+            raw_class_12_url: base + "cam-raw-12.png",
+            class_15_url: base + "cam-15.png",
+            raw_class_15_url: base + "cam-raw-15.png",
+          },
+        },
+      },
+    },
+    { 12: "dog", 15: "person" },
+  );
+  assert.deepEqual(
+    views.map((v) => [v.label, v.url.split("/").pop(), v.compare?.url.split("/").pop()]),
+    [
+      ["叠加图", "overlay.png", undefined],
+      ["彩色分割", "colored.png", undefined],
+      ["类别掩码", "mask.png", undefined],
+      ["像素置信度", "confidence.png", undefined],
+      ["注意力 · dog（细化后）", "cam-12.png", "cam-raw-12.png"],
+      ["注意力 · person（细化后）", "cam-15.png", "cam-raw-15.png"],
+    ],
+  );
+});
+
+test("scoreBars keeps the top scores plus every detected class, highest first", () => {
+  const class_scores = Array.from({ length: 20 }, (_, i) => ({ id: i + 1, name: `c${i + 1}`, score: (i + 1) / 40 }));
+  // A detected class can rank below the cut-off when the threshold is low; it must still be shown.
+  const bars = scoreBars(
+    { stages: { segmentation: { data: { class_scores, detected_classes: [{ id: 20 }, { id: 2 }] } } } },
+    3,
+  );
+  assert.deepEqual(
+    bars.map((b) => [b.id, b.detected]),
+    [[20, true], [19, false], [18, false], [2, true]],
+  );
+});
+
+test("stageTimings lists stages in pipeline order and attributes the remainder to other", () => {
+  const timings = stageTimings({
+    duration_ms: 1000,
+    stages: {
+      // Keys arrive alphabetically sorted after the Rust round trip; resize took no time.
+      segmentation: { data: { timings_ms: { forward: 600, refine: 50, resize: 0, superpixels: 100 } } },
+      cam: { duration_ms: 150 },
+    },
+  });
+  assert.deepEqual(
+    timings.map((t) => [t.label, t.ms]),
+    [["超像素", 100], ["模型前向", 600], ["亲和力细化", 50], ["注意力图产物", 150], ["其他", 100]],
   );
 });

@@ -82,20 +82,87 @@ export function color(id) {
   return `rgb(${r},${g},${b})`;
 }
 
-/** Result views in display order: prediction outputs, then SLIC, then one CAM per detected class. */
+/**
+ * Result views in display order: prediction outputs, pixel confidence, SLIC, then one CAM per
+ * detected class. A view with `compare` shows that image instead of the original on the left:
+ * refined CAMs are paired with the same class before superpixel-affinity refinement.
+ */
 export function resultViews(result, classNames = {}) {
   if (!result) return [];
   const views = [
-    ["overlay_url", "叠加图", result.outputs.overlay_url],
-    ["colored_url", "彩色分割", result.outputs.colored_url],
-    ["mask_url", "类别掩码", result.outputs.mask_url],
+    { id: "overlay_url", label: "叠加图", url: result.outputs.overlay_url },
+    { id: "colored_url", label: "彩色分割", url: result.outputs.colored_url },
+    { id: "mask_url", label: "类别掩码", url: result.outputs.mask_url },
   ];
+  const confidence = result.stages?.segmentation?.artifacts?.confidence_url;
+  if (confidence) views.push({ id: "confidence", label: "像素置信度", url: confidence });
   const slic = result.stages?.slic?.artifacts || {};
-  if (slic.boundary_url) views.push(["slic_boundary", "超像素边界", slic.boundary_url]);
-  if (slic.regions_url) views.push(["slic_regions", "超像素区域", slic.regions_url]);
-  for (const [key, url] of Object.entries(result.stages?.cam?.artifacts || {})) {
+  if (slic.boundary_url) views.push({ id: "slic_boundary", label: "超像素边界", url: slic.boundary_url });
+  if (slic.regions_url) views.push({ id: "slic_regions", label: "超像素区域", url: slic.regions_url });
+  const cams = result.stages?.cam?.artifacts || {};
+  for (const [key, url] of Object.entries(cams)) {
     const id = Number(key.match(/^class_(\d+)_url$/)?.[1]);
-    views.push([`cam_${id}`, `注意力 · ${classNames[id] ?? id}`, url]);
+    if (!id) continue; // raw_class_<id>_url entries are attached to their refined view below
+    const name = classNames[id] ?? id;
+    const raw = cams[`raw_class_${id}_url`];
+    views.push(
+      raw
+        ? { id: `cam_${id}`, label: `注意力 · ${name}（细化后）`, url,
+            compare: { label: `注意力 · ${name}（细化前）`, url: raw } }
+        : { id: `cam_${id}`, label: `注意力 · ${name}`, url },
+    );
   }
-  return views.map(([id, label, url]) => ({ id, label, url }));
+  return views;
+}
+
+/**
+ * Image-level class scores, highest first: the top `limit` plus every detected class.
+ * Older servers without `class_scores` fall back to the classes present in the mask.
+ */
+export function scoreBars(result, limit = 8) {
+  const seg = result?.stages?.segmentation?.data || {};
+  const detected = new Set((seg.detected_classes || []).map((c) => c.id));
+  const all =
+    seg.class_scores ||
+    (result?.classes || []).filter((c) => c.score != null).map(({ id, name, score }) => ({ id, name, score }));
+  const sorted = [...all].sort((a, b) => b.score - a.score);
+  return sorted
+    .filter((c, rank) => rank < limit || detected.has(c.id))
+    .map((c) => ({ ...c, detected: detected.has(c.id) }));
+}
+
+const TIMING_LABELS = {
+  resize: "缩放",
+  superpixels: "超像素",
+  forward: "模型前向",
+  refine: "亲和力细化",
+  postprocess: "后处理",
+  crf: "CRF",
+  save_outputs: "保存结果",
+  slic: "超像素产物",
+  cam: "注意力图产物",
+  other: "其他",
+};
+
+const TIMING_ORDER = Object.keys(TIMING_LABELS);
+
+/**
+ * Per-stage server time in pipeline order (the Rust side re-sorts JSON object keys, so order is
+ * imposed here); `other` is what the total spends outside them. Sub-millisecond stages are dropped.
+ */
+export function stageTimings(result) {
+  if (!result) return [];
+  const entries = Object.entries(result.stages?.segmentation?.data?.timings_ms || {});
+  for (const name of ["slic", "cam"]) {
+    const ms = result.stages?.[name]?.duration_ms;
+    if (ms != null) entries.push([name, ms]);
+  }
+  if (!entries.length) return [];
+  const other = result.duration_ms - entries.reduce((sum, [, ms]) => sum + ms, 0);
+  if (other > 0) entries.push(["other", other]);
+  const rank = (key) => (TIMING_ORDER.includes(key) ? TIMING_ORDER.indexOf(key) : TIMING_ORDER.length);
+  return entries
+    .filter(([, ms]) => ms >= 0.5)
+    .sort(([a], [b]) => rank(a) - rank(b))
+    .map(([key, ms]) => ({ key, label: TIMING_LABELS[key] ?? key, ms }));
 }

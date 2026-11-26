@@ -48,9 +48,9 @@
 
 | 节点 | 返回 |
 | --- | --- |
-| segmentation | `parameters`（含实际推理尺寸 `inference_size`）、`data.detected_classes`（超过阈值的类别及分数） |
+| segmentation | `parameters`（含实际推理尺寸 `inference_size`）；`data.detected_classes`（超过阈值的类别及分数）；`data.class_scores`（全部前景类别的图像级分数）；`data.timings_ms`（`resize`、`superpixels`、`forward`、`refine`、`postprocess`、`crf`、`save_outputs`，毫秒，未执行的阶段不出现）；有检测类别时另有 `data.confidence`（`measure=top1_minus_top2`、`mean`、`low_threshold`、`low_ratio`）与 `artifacts.confidence_url`（CRF 前的像素置信度 JET 叠加图） |
 | slic | 模型实际使用的超像素：标签 NPY（原图尺寸 int32）、彩色区域图、黄色边界图；`used_for_prediction=true` |
-| cam | 每个检测类别一张 JET 热力叠加图，`artifacts.class_<id>_url`；`used_for_prediction=false` |
+| cam | 每个检测类别一张 JET 热力叠加图，`artifacts.class_<id>_url`；开启 `patch_attn_refine` 时另有细化前的 `artifacts.raw_class_<id>_url`，`data.refined` 标明是否细化；`used_for_prediction=false` |
 
 节点 `status` 取 `completed`、`unavailable`、`failed`；辅助节点失败不影响已生成的预测。
 

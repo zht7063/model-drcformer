@@ -64,6 +64,22 @@ def save_regions(labels, image, directory, prefix):
             "boundary": f"{prefix}-boundary.png"}
 
 
+LOW_CONFIDENCE = 0.1  # top1 - top2 margin below which a pixel counts as uncertain
+
+
+def minmax(channel):
+    return (channel - channel.min()) / (channel.max() - channel.min() + 1e-8)
+
+
+def save_heat(heat, image, path):
+    """Upsample a [0, 1] working-size map to the image, save it as a JET overlay, return it."""
+    heat = F.interpolate(heat[None, None].float(), size=image.size[::-1], mode="bilinear",
+                         align_corners=False)[0, 0].clamp(0, 1).cpu().numpy()
+    jet = (JET_CMAP(heat)[..., :3] * 255).astype(np.uint8)
+    Image.blend(image, Image.fromarray(jet), .5).save(path)
+    return heat
+
+
 def load_model(spec, device):
     payload = torch.load(spec.checkpoint, map_location="cpu", weights_only=True)
     state = payload.get("model", payload) if isinstance(payload, dict) else payload
@@ -117,12 +133,25 @@ class SegmentationEngine:
     def metadata(self):
         return [loaded.metadata() for loaded in self.models.values()]
 
+    def sync(self):
+        """Wait for queued GPU work so wall-clock stage timings are not shifted to a later stage."""
+        if self.device.startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+
     @torch.inference_mode()
     def cams(self, loaded, working, spix, params):
-        """Sum of per-scale (and flipped) CAMs at working size, plus mean image-level class scores."""
+        """Per-scale (and flipped) CAMs summed at working size, with and without affinity refinement.
+
+        Returns (refined, unrefined or None when refinement is off, mean class scores, refine ms).
+        """
         width, height = working.size
-        total, scores = None, []
+        total, raw_total, scores, refine_ms = None, None, [], 0.0
         autocast = torch.autocast("cuda", enabled=self.device.startswith("cuda"))
+
+        def to_working(cam, flipped):
+            cam = F.interpolate(cam, size=(height, width), mode="bilinear", align_corners=False)
+            return cam.flip(-1) if flipped else cam
+
         for scale in params.scales:
             size = (max(16, round(width * scale)), max(16, round(height * scale)))
             image = torch.from_numpy(np.asarray(working.resize(size, Image.Resampling.BICUBIC)).copy())
@@ -140,59 +169,98 @@ class SegmentationEngine:
                         attention_type=params.attention_type)
                 logits, cam = logits.float(), cam.float()
                 if params.patch_attn_refine:
+                    raw = to_working(cam, flipped)
+                    raw_total = raw if raw_total is None else raw_total + raw
+                    self.sync()
+                    start = time.perf_counter()
                     cam = refine_cam_with_spatch_affinity(
                         cam, s[:, 0], patch_attn.sum(0).float().squeeze(0), output=logits,
                         pos_thr=0.5, alpha=0.85, steps=10, is_logit=True)
-                cam = F.interpolate(cam, size=(height, width), mode="bilinear", align_corners=False)
-                cam = cam.flip(-1) if flipped else cam
+                    self.sync()
+                    refine_ms += (time.perf_counter() - start) * 1000
+                cam = to_working(cam, flipped)
                 total = cam if total is None else total + cam
                 scores.append(torch.sigmoid(logits))
-        return total[0], torch.stack(scores).mean(0)[0]
+        self.sync()
+        return (total[0], None if raw_total is None else raw_total[0],
+                torch.stack(scores).mean(0)[0], refine_ms)
 
     def run(self, image, include, directory, model_id=None, params=None):
         params = params or InferenceParams()
         loaded = self.models[model_id or self.default_model]
         started = time.perf_counter()
+        timings = {}
+
+        def lap(name, since):
+            now = time.perf_counter()
+            timings[name] = round((now - since) * 1000, 2)
+            return now
+
         working = image
         if max(image.size) > self.max_inference_side:
             working = image.copy()
             working.thumbnail((self.max_inference_side,) * 2, Image.Resampling.BICUBIC)
+        mark = lap("resize", started)
         spix = get_spix_label(np.asarray(working), num_components=loaded.spec.num_sp_tokens)
         spix = spix.astype(np.int64)
-        cam, scores = self.cams(loaded, working, spix, params)
+        mark = lap("superpixels", mark)
+        cam, raw_cam, scores, refine_ms = self.cams(loaded, working, spix, params)
+        mark = lap("forward", mark)
+        timings["forward"] = round(timings["forward"] - refine_ms, 2)
+        if params.patch_attn_refine:
+            timings["refine"] = round(refine_ms, 2)
 
         detected = [int(i) for i in torch.nonzero(scores > params.cls_threshold).flatten()]
-        normalized = {}
-        for index in detected:
-            channel = cam[index]
-            normalized[index] = (channel - channel.min()) / (channel.max() - channel.min() + 1e-8)
+        normalized = {index: minmax(cam[index]) for index in detected}
         # Channel 0 is background at bg_threshold; channel k is foreground class detected[k-1].
         probs = torch.stack([torch.full_like(cam[0], params.bg_threshold)]
                             + [normalized[i] for i in detected])
+        # Pixel confidence: winning channel minus runner-up, before CRF; undefined with one channel.
+        margin = None
+        if detected:
+            top = probs.topk(2, dim=0).values
+            margin = (top[0] - top[1]).clamp(0, 1)
         lookup = np.array([0] + [i + 1 for i in detected], dtype=np.uint8)
+        mark = lap("postprocess", mark)
         if params.crf and detected:
             picked = crf_labels(np.asarray(working), probs.cpu().numpy(), params.crf_iters)
             mask = lookup[picked]
             if working.size != image.size:
                 mask = np.asarray(Image.fromarray(mask).resize(image.size, Image.Resampling.NEAREST))
+            mark = lap("crf", mark)
         else:
             if working.size != image.size:
                 probs = F.interpolate(probs[None], size=image.size[::-1], mode="bilinear",
                                       align_corners=False)[0]
             mask = lookup[probs.argmax(0).cpu().numpy()]
+            timings["postprocess"] = round(timings["postprocess"]
+                                           + (time.perf_counter() - mark) * 1000, 2)
+            mark = time.perf_counter()
 
         colors = palette()[mask]
         Image.fromarray(mask).save(directory / "mask.png")
         Image.fromarray(colors).save(directory / "colored.png")
         Image.blend(image, Image.fromarray(colors), .45).save(directory / "overlay.png")
+        data, artifacts = {}, {}
+        if margin is not None:
+            confidence = save_heat(margin, image, directory / "confidence.png")
+            artifacts["confidence"] = "confidence.png"
+            data["confidence"] = {"measure": "top1_minus_top2", "mean": float(confidence.mean()),
+                                  "low_threshold": LOW_CONFIDENCE,
+                                  "low_ratio": float((confidence < LOW_CONFIDENCE).mean())}
+        mark = lap("save_outputs", mark)
         class_scores = {i + 1: float(scores[i]) for i in range(len(scores))}
+        data.update(
+            detected_classes=[{"id": i + 1, "name": loaded.classes[i + 1],
+                               "score": class_scores[i + 1]} for i in detected],
+            class_scores=[{"id": i, "name": loaded.classes[i], "score": s}
+                          for i, s in class_scores.items()],
+            timings_ms=timings)
         stages = {"segmentation": {
             "status": "completed", "used_for_prediction": True,
             "method": "drcformer_multiscale_cam" + ("_crf" if params.crf else ""),
             "parameters": {**params.model_dump(), "inference_size": list(working.size)},
-            "data": {"detected_classes": [
-                {"id": i + 1, "name": loaded.classes[i + 1], "score": class_scores[i + 1]}
-                for i in detected]},
+            "data": data, **({"artifacts": artifacts} if artifacts else {}),
             "duration_ms": round((time.perf_counter() - started) * 1000, 2)}}
         for name in ("slic", "cam"):
             if name not in include:
@@ -212,15 +280,16 @@ class SegmentationEngine:
                 else:
                     artifacts = {}
                     for index in detected:
-                        heat = normalized[index][None, None]
-                        heat = F.interpolate(heat, size=image.size[::-1], mode="bilinear",
-                                             align_corners=False)[0, 0].clamp(0, 1).cpu().numpy()
-                        jet = (JET_CMAP(heat)[..., :3] * 255).astype(np.uint8)
-                        Image.blend(image, Image.fromarray(jet), .5).save(directory / f"cam-{index + 1}.png")
+                        save_heat(normalized[index], image, directory / f"cam-{index + 1}.png")
                         artifacts[f"class_{index + 1}"] = f"cam-{index + 1}.png"
+                        if raw_cam is not None:
+                            save_heat(minmax(raw_cam[index]), image,
+                                      directory / f"cam-raw-{index + 1}.png")
+                            artifacts[f"raw_class_{index + 1}"] = f"cam-raw-{index + 1}.png"
                     stage.update(method=f"drcformer_{params.attention_type}_cam",
                                  source="detected_classes",
-                                 data={"class_ids": [i + 1 for i in detected]}, artifacts=artifacts)
+                                 data={"class_ids": [i + 1 for i in detected],
+                                       "refined": raw_cam is not None}, artifacts=artifacts)
                 stage["status"] = "completed"
             except Exception:
                 LOGGER.exception("auxiliary stage failed: %s", name)

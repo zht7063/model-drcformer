@@ -390,6 +390,91 @@ hr {
   display: flex;
   flex-direction: column;
 }
+.output-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 260px;
+  gap: 12px;
+}
+.insights {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  font-size: 12px;
+  padding: 0 4px 0 12px;
+  border-left: 1px solid var(--border);
+}
+.insights h2 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.insights h2 small {
+  font-weight: 400;
+  color: var(--muted);
+  margin-left: 4px;
+}
+.score-row,
+.timing-row {
+  display: grid;
+  grid-template-columns: 76px 1fr 44px;
+  align-items: center;
+  gap: 6px;
+  height: 17px;
+}
+.timing-row {
+  grid-template-columns: 76px 1fr 56px;
+}
+.score-row b,
+.timing-row b {
+  font-weight: 400;
+  text-align: right;
+  color: var(--muted);
+}
+.score-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.score-row.detected .score-name,
+.score-row.detected b {
+  color: #243447;
+  font-weight: 600;
+}
+.score-chart {
+  position: relative;
+}
+/* Threshold line across every bar, positioned in the bar column (76px name + 6px gap, 44px value + 6px gap). */
+.score-chart::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  left: calc(82px + (100% - 132px) * var(--threshold));
+  border-left: 1.5px dashed #c0392b;
+  pointer-events: none;
+}
+.score-track,
+.timing-track {
+  height: 10px;
+  background: var(--scroll-track);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.score-track i,
+.timing-track i {
+  display: block;
+  height: 100%;
+  background: #b4c0cd;
+}
+.timing-track i {
+  background: var(--primary);
+  min-width: 1px;
+}
 .compare {
   flex: 1;
   min-height: 0;
