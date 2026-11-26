@@ -20,7 +20,7 @@ conda activate py310
 
 ```bash
 conda activate py310
-cd /home/ubuntu/projects/drcformer/src/drcformer
+cd /home/ubuntu/projects/model-drcformer/src/drcformer
 python main.py --help
 ```
 
@@ -53,3 +53,38 @@ python main.py \
 python main.py \
   --sp_idx_dir /home/ubuntu/projects/outputs/drcformer/sp_idx/dino/npy
 ```
+
+### 生成 DINO 区域划分（已验证）
+
+本机可用的 DINO 权重和 VOC2012 数据分别位于：
+
+- 权重：`/home/ubuntu/projects/weights/dino22416b.npy`
+- 数据：`/home/ubuntu/projects/datasets/voc2012`
+- 图像列表：`/home/ubuntu/projects/datasets/voc2012/voc12`
+
+项目根目录已有由 `uv` 创建的 `.venv`。先做两张图的 GPU 验证：
+
+```bash
+cd /home/ubuntu/projects/model-drcformer
+.venv/bin/python src/dino-sp-generator/generate_sp.py \
+  --data-path /home/ubuntu/projects/datasets/voc2012 \
+  --img-list /home/ubuntu/projects/datasets/voc2012/voc12 \
+  --model-path /home/ubuntu/projects/weights/dino22416b.npy \
+  --out-dir /tmp/drcformer-dino-sp-smoke \
+  --tau 0.3 --device cuda --max-count 2 --batch-size 2 --num-workers 2 \
+  --crf-only --no-png --no-resume
+```
+
+正式生成时移除 `--max-count 2`，并把 `--out-dir` 设为训练要读取的位置：
+
+```bash
+.venv/bin/python src/dino-sp-generator/generate_sp.py \
+  --data-path /home/ubuntu/projects/datasets/voc2012 \
+  --img-list /home/ubuntu/projects/datasets/voc2012/voc12 \
+  --model-path /home/ubuntu/projects/weights/dino22416b.npy \
+  --out-dir /home/ubuntu/projects/outputs/drcformer/sp_idx/dino \
+  --tau 0.3 --device cuda --batch-size 8 --num-workers 4 \
+  --crf-only --no-png
+```
+
+脚本会把供训练读取的区域标签写入 `--out-dir/npy/{image_id}.npy`；`--crf-only --no-png` 只保留该索引数组，避免额外生成 PNG 可视化图。
