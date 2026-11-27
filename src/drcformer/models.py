@@ -542,7 +542,13 @@ class SuperpixelVisionTransformer(VisionTransformer):
         attention_type="fused",
         return_att=False,
         return_b1: bool = False,
+        return_extras: bool = False,
     ) -> torch.Tensor:
+        """return_extras (only with return_att): return a dict instead of the
+        (x_logits, cams, patch_attn) tuple, adding the two logit branches, all three
+        CAM types and the per-superpixel class scores. The selected `cams` are identical
+        to the tuple's; no parameters are added, so checkpoints load unchanged.
+        """
 
         # --- 进行特征传播 ---
         # 变量说明：
@@ -622,6 +628,7 @@ class SuperpixelVisionTransformer(VisionTransformer):
 
             # === 3) 映射到像素空间，得到 cams: (B, K, H, W) ===
             cams = []
+            cams_all = {"mct": [], "patchcam": [], "fused": []}  # 仅 return_extras 时填充
             # spix_label: (B, 1, H, W) 或 (B, H, W)，值域 ∈ [0..T-1]
             if spix_label.dim() == 4:
                 assignment = spix_label.squeeze(1)  # (B, H, W)
@@ -636,7 +643,11 @@ class SuperpixelVisionTransformer(VisionTransformer):
                 H_i, W_i = assign_b.shape[-2], assign_b.shape[-1]
                 if Ti == 0:
                     # 没有有效 token，直接返回零 CAM，避免对空张量索引导致非法访问
-                    cams.append(torch.zeros(K, H_i, W_i, device=x.device, dtype=x.dtype))
+                    zeros = torch.zeros(K, H_i, W_i, device=x.device, dtype=x.dtype)
+                    cams.append(zeros)
+                    if return_extras:
+                        for kind in cams_all:
+                            cams_all[kind].append(zeros)
                     continue
                 # 将标签裁剪到 [0, Ti-1]，避免负索引或越界
                 assign_b = assign_b.clamp(min=0, max=max(Ti - 1, 0))  # (H, W)
@@ -661,11 +672,26 @@ class SuperpixelVisionTransformer(VisionTransformer):
                     raise RuntimeError(f"Error! {attention_type} is not defined!")
 
                 cams.append(cam_b)
+                if return_extras:
+                    cams_all["mct"].append(mtatt_hw)
+                    cams_all["patchcam"].append(feat_hw)
+                    cams_all["fused"].append(torch.sqrt((mtatt_hw * feat_hw).clamp_min(0)))
 
             cams = torch.stack(cams, dim=0)  # (B, K, H, W)
 
             # === 4) 与网格版一致的 x_logits 汇合 ===
             x_logits = (x_cls_logits + x_patch_logits) / 2  # (B, K)
+            if return_extras:
+                return {
+                    "logits": x_logits,  # (B, K)，与三元组第一项相同
+                    "cams": cams,  # (B, K, H, W)，attention_type 选定的 CAM
+                    "patch_attn": patch_attn,  # (L, B, T, T)
+                    "cls_logits": x_cls_logits,  # (B, K)，类 token 路
+                    "patch_logits": x_patch_logits,  # (B, K)，超像素 token 路
+                    "cams_all": {k: torch.stack(v, dim=0) for k, v in cams_all.items()},  # 各 (B, K, H, W)
+                    "token_cls": x_token_cls.detach(),  # (B, T, K)，每个超像素的类别分数（未 ReLU）
+                    "token_mask": mask_tok,  # (B, T)，True 为非空超像素
+                }
             return (
                 x_logits,
                 cams,
