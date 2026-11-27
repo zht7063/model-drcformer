@@ -65,38 +65,52 @@ test("resultViews lists outputs, SLIC and per-class CAM in display order", () =>
     views.map((v) => v.label),
     ["叠加图", "彩色分割", "类别掩码", "超像素边界", "注意力 · dog"],
   );
+  // A server without the three-type CAMs gives one CAM view per class, beside the original.
+  assert.equal(views[4].panels.length, 1);
 });
 
-test("resultViews adds pixel confidence and pairs each refined CAM with its unrefined CAM", () => {
+test("resultViews adds confidence, superpixel classes, refined CAM pairs and the three CAM types", () => {
   const base = "/api/v1/results/" + "b".repeat(32) + "/";
   const views = resultViews(
     {
       outputs: { mask_url: base + "mask.png", colored_url: base + "colored.png", overlay_url: base + "overlay.png" },
       stages: {
-        segmentation: { artifacts: { confidence_url: base + "confidence.png" } },
+        segmentation: {
+          artifacts: { confidence_url: base + "confidence.png", token_classes_url: base + "token-classes.png" },
+          data: { token_classes: { classes: [{ id: 0, superpixels: 150 }, { id: 12, name: "dog", superpixels: 30 }] } },
+        },
         cam: {
+          // patchcam is the selected type, so its CAM is class_<id>_url and has no patchcam_ entry.
+          data: { attention_type: "patchcam", refined: true },
           artifacts: {
             class_12_url: base + "cam-12.png",
             raw_class_12_url: base + "cam-raw-12.png",
-            class_15_url: base + "cam-15.png",
-            raw_class_15_url: base + "cam-raw-15.png",
+            fused_class_12_url: base + "cam-fused-12.png",
+            mct_class_12_url: base + "cam-mct-12.png",
           },
         },
       },
     },
-    { 12: "dog", 15: "person" },
+    { 12: "dog" },
   );
+  const file = (url) => url.split("/").pop();
   assert.deepEqual(
-    views.map((v) => [v.label, v.url.split("/").pop(), v.compare?.url.split("/").pop()]),
+    views.map((v) => [v.label, v.panels.map((p) => [p.label, file(p.url)])]),
     [
-      ["叠加图", "overlay.png", undefined],
-      ["彩色分割", "colored.png", undefined],
-      ["类别掩码", "mask.png", undefined],
-      ["像素置信度", "confidence.png", undefined],
-      ["注意力 · dog（细化后）", "cam-12.png", "cam-raw-12.png"],
-      ["注意力 · person（细化后）", "cam-15.png", "cam-raw-15.png"],
+      ["叠加图", [["叠加图", "overlay.png"]]],
+      ["彩色分割", [["彩色分割", "colored.png"]]],
+      ["类别掩码", [["类别掩码", "mask.png"]]],
+      ["像素置信度", [["像素置信度", "confidence.png"]]],
+      ["超像素类别", [["超像素类别", "token-classes.png"]]],
+      ["注意力 · dog · 细化前后", [["细化前", "cam-raw-12.png"], ["细化后", "cam-12.png"]]],
+      [
+        "注意力 · dog · 三种 CAM（均已细化）",
+        [["融合（fused）", "cam-fused-12.png"], ["PatchCAM（当前）", "cam-12.png"], ["MCT", "cam-mct-12.png"]],
+      ],
     ],
   );
+  // Background superpixels are not listed in the superpixel-class legend.
+  assert.deepEqual(views[4].legend.map((c) => c.id), [12]);
 });
 
 test("scoreBars keeps the top scores plus every detected class, highest first", () => {

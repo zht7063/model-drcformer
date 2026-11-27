@@ -4,6 +4,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  ATTENTION_LABELS as attentionNames,
   ATTENTION_TYPES,
   FALLBACK_PARAMS,
   buildParams,
@@ -19,7 +20,6 @@ import {
 const pages = { config: "参数配置", segment: "语义分割" };
 const activePage = ref("config");
 const stageNames = { slic: "超像素分割", cam: "模型注意力图" };
-const attentionNames = { fused: "融合（fused）", patchcam: "PatchCAM", mct: "MCT" };
 
 // Connection: the key is handed to the Rust side, which keeps it in memory only.
 const connectionDialog = ref(null);
@@ -59,22 +59,34 @@ const classNames = computed(() =>
 const views = computed(() =>
   shownOutcome.value
     ? resultViews(shownOutcome.value.result, classNames.value).filter(
-        (v) => shownOutcome.value.files[v.url],
+        (v) => v.panels.every((p) => shownOutcome.value.files[p.url]),
       )
     : [],
 );
 const currentView = computed(() => views.value[viewIndex.value % (views.value.length || 1)]);
-const currentSrc = computed(() =>
-  currentView.value ? convertFileSrc(shownOutcome.value.files[currentView.value.url]) : "",
-);
-const compareSrc = computed(() => {
-  const path = shownOutcome.value?.files[currentView.value?.compare?.url];
-  return path ? convertFileSrc(path) : "";
+// One panel is shown next to the original; two or three panels replace it side by side.
+const figures = computed(() => {
+  const view = currentView.value;
+  if (!view) return [];
+  const panels = view.panels.map((p) => ({
+    label: p.label,
+    src: convertFileSrc(shownOutcome.value.files[p.url]),
+  }));
+  if (panels.length > 1) return panels;
+  return [{ label: "原图", src: confirmed.value.image.data_url }, { ...panels[0], label: view.label }];
 });
+const scoreMode = ref("final"); // "final" | "branches"
 const resultSummary = computed(() => shownOutcome.value?.result);
 const scores = computed(() => scoreBars(resultSummary.value));
 const scoreThreshold = computed(() => resultSummary.value?.parameters.cls_threshold ?? 0.5);
 const timings = computed(() => stageTimings(resultSummary.value));
+const hasBranches = computed(() => scores.value.some((c) => c.cls_score != null));
+function branchTitle(c) {
+  const parts = [`${c.name}：最终 ${c.score.toFixed(3)}`];
+  if (c.cls_score != null)
+    parts.push(`类 token 路 ${c.cls_score.toFixed(3)}`, `超像素 token 路 ${c.patch_score.toFixed(3)}`);
+  return parts.join("，") + (c.detected ? "（已检测）" : "");
+}
 const confidence = computed(
   () => resultSummary.value?.stages.segmentation?.data?.confidence || null,
 );
@@ -481,41 +493,58 @@ onBeforeUnmount(() => unlistenDrop?.());
         <section class="output" :aria-busy="running" aria-label="输出效果展示">
           <template v-if="shownOutcome">
             <div class="output-body">
-            <div class="compare">
-              <figure v-if="compareSrc">
-                <img :src="compareSrc" :alt="currentView.compare.label" />
-                <figcaption>{{ currentView.compare.label }}</figcaption>
-              </figure>
-              <figure v-else>
-                <img :src="confirmed.image.data_url" alt="原图" />
-                <figcaption>原图</figcaption>
-              </figure>
-              <figure>
+            <div class="view-column">
+            <div class="compare" :class="{ triple: figures.length > 2 }">
+              <figure v-for="(f, i) in figures" :key="i">
                 <img
-                  v-if="currentView"
-                  :src="currentSrc"
-                  :alt="currentView.label"
-                  :class="{ pixelated: currentView.id === 'mask_url' }"
+                  :src="f.src"
+                  :alt="f.label"
+                  :class="{ pixelated: currentView.id === 'mask_url' && i > 0 }"
                 />
-                <figcaption>
-                  {{ currentView?.label || "无可用预览" }}
-                  <span v-if="views.length">（{{ (viewIndex % views.length) + 1 }}/{{ views.length }}）</span>
-                </figcaption>
+                <figcaption>{{ f.label }}</figcaption>
               </figure>
+              <p v-if="!figures.length" class="placeholder">无可用预览</p>
+            </div>
+            <p v-if="currentView" class="view-caption">
+              <template v-if="currentView.panels.length > 1">{{ currentView.label }}</template>
+              <span v-if="views.length">（{{ (viewIndex % views.length) + 1 }}/{{ views.length }}）</span>
+              <span v-for="c in currentView.legend || []" :key="c.id" class="legend-item inline">
+                <i :style="{ background: color(c.id) }"></i>{{ c.name }}
+                <b class="mono">{{ c.superpixels }}</b>
+              </span>
+            </p>
             </div>
             <aside class="insights">
               <section v-if="scores.length" aria-label="类别置信度">
-                <h2>类别置信度 <small>阈值 {{ scoreThreshold.toFixed(2) }}</small></h2>
+                <h2>
+                  类别置信度 <small>阈值 {{ scoreThreshold.toFixed(2) }}</small>
+                  <span v-if="hasBranches" class="mode-switch" role="group" aria-label="分数类型">
+                    <button
+                      v-for="(label, mode) in { final: '最终', branches: '两路' }"
+                      :key="mode"
+                      :class="{ active: scoreMode === mode }"
+                      :aria-pressed="scoreMode === mode"
+                      @click="scoreMode = mode"
+                    >{{ label }}</button>
+                  </span>
+                </h2>
+                <p v-if="scoreMode === 'branches' && hasBranches" class="branch-key">
+                  <i class="cls"></i>类 token 路 <i class="patch"></i>超像素 token 路
+                </p>
                 <div class="score-chart" :style="{ '--threshold': scoreThreshold }">
                   <div
                     v-for="item in scores"
                     :key="item.id"
                     class="score-row"
                     :class="{ detected: item.detected }"
-                    :title="`${item.name}：${item.score.toFixed(3)}${item.detected ? '（已检测）' : ''}`"
+                    :title="branchTitle(item)"
                   >
                     <span class="score-name">{{ item.name }}</span>
-                    <span class="score-track">
+                    <span v-if="scoreMode === 'branches' && hasBranches" class="score-track split">
+                      <i class="cls" :style="{ width: `${item.cls_score * 100}%` }"></i>
+                      <i class="patch" :style="{ width: `${item.patch_score * 100}%` }"></i>
+                    </span>
+                    <span v-else class="score-track">
                       <i
                         :style="{
                           width: `${item.score * 100}%`,

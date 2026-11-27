@@ -64,6 +64,7 @@ def save_regions(labels, image, directory, prefix):
             "boundary": f"{prefix}-boundary.png"}
 
 
+ATTENTION_TYPES = ("fused", "patchcam", "mct")
 LOW_CONFIDENCE = 0.1  # top1 - top2 margin below which a pixel counts as uncertain
 
 
@@ -78,6 +79,31 @@ def save_heat(heat, image, path):
     jet = (JET_CMAP(heat)[..., :3] * 255).astype(np.uint8)
     Image.blend(image, Image.fromarray(jet), .5).save(path)
     return heat
+
+
+def save_token_classes(token_cls, token_mask, spix, image, path, classes):
+    """Paint each superpixel with its own argmax foreground class when that logit is positive.
+
+    token_cls (T, K) are the head_token logits of superpixel label t; empty superpixels (masked
+    tokens) and superpixels whose best logit is <= 0 stay background. Returns per-class counts.
+    """
+    tokens = token_cls.shape[0]
+    best, index = token_cls.max(1)
+    label = torch.where((best > 0) & token_mask, index + 1, torch.zeros_like(index)).cpu().numpy()
+    regions = np.clip(spix, 0, tokens - 1).astype(np.int32)
+    regions = np.asarray(Image.fromarray(regions).resize(image.size, Image.Resampling.NEAREST))
+    per_pixel = label[regions].astype(np.uint8)
+    painted = np.asarray(Image.blend(image, Image.fromarray(palette()[per_pixel]), .55)).copy()
+    edges = np.zeros(regions.shape, dtype=bool)
+    edges[1:] |= regions[1:] != regions[:-1]
+    edges[:, 1:] |= regions[:, 1:] != regions[:, :-1]
+    painted[edges] = [255, 255, 255]
+    Image.fromarray(painted).save(path)
+    valid = label[token_mask.cpu().numpy()]
+    counts = np.bincount(valid, minlength=len(classes))
+    return {"measure": "argmax_token_logit_gt_0", "superpixels": int(valid.size),
+            "classes": [{"id": i, "name": classes[i], "superpixels": int(n)}
+                        for i, n in enumerate(counts) if n]}
 
 
 def load_model(spec, device):
@@ -139,13 +165,21 @@ class SegmentationEngine:
             torch.cuda.synchronize(self.device)
 
     @torch.inference_mode()
-    def cams(self, loaded, working, spix, params):
-        """Per-scale (and flipped) CAMs summed at working size, with and without affinity refinement.
+    def cams(self, loaded, working, spix, params, all_types=False):
+        """Run every scale (and flip) branch once and average/sum its outputs at working size.
 
-        Returns (refined, unrefined or None when refinement is off, mean class scores, refine ms).
+        Returns a dict: `cam` (K,H,W) summed selected CAM, refined when patch_attn_refine;
+        `raw` the same before refinement (None when refinement is off); `types` per attention
+        type summed CAMs (all three when all_types, else only the selected one), each refined
+        like `cam`; `scores`, `cls_scores`, `patch_scores` (K,) mean sigmoid of the final,
+        class-token and superpixel-token logits; `token_cls` (T,K) mean per-superpixel class
+        logits with `token_mask` (T,) for non-empty superpixels; `refine_ms`.
         """
         width, height = working.size
-        total, raw_total, scores, refine_ms = None, None, [], 0.0
+        kinds = ATTENTION_TYPES if all_types else (params.attention_type,)
+        totals = dict.fromkeys(kinds)
+        raw_total, refine_ms = None, 0.0
+        scores, cls_scores, patch_scores, tokens = [], [], [], []
         autocast = torch.autocast("cuda", enabled=self.device.startswith("cuda"))
 
         def to_working(cam, flipped):
@@ -164,26 +198,41 @@ class SegmentationEngine:
                     x, s = x.flip(-1), s.flip(-1)
                 x, s = x.to(self.device), s.to(self.device)
                 with autocast:
-                    logits, cam, patch_attn = loaded.model(
-                        x, spix_label=s, return_att=True, n_layers=params.layer_index,
-                        attention_type=params.attention_type)
-                logits, cam = logits.float(), cam.float()
-                if params.patch_attn_refine:
-                    raw = to_working(cam, flipped)
-                    raw_total = raw if raw_total is None else raw_total + raw
-                    self.sync()
-                    start = time.perf_counter()
-                    cam = refine_cam_with_spatch_affinity(
-                        cam, s[:, 0], patch_attn.sum(0).float().squeeze(0), output=logits,
-                        pos_thr=0.5, alpha=0.85, steps=10, is_logit=True)
-                    self.sync()
-                    refine_ms += (time.perf_counter() - start) * 1000
-                cam = to_working(cam, flipped)
-                total = cam if total is None else total + cam
+                    out = loaded.model(
+                        x, spix_label=s, return_att=True, return_extras=True,
+                        n_layers=params.layer_index, attention_type=params.attention_type)
+                logits = out["logits"].float()
+                affinity = out["patch_attn"].sum(0).float().squeeze(0)
+                for kind in kinds:
+                    cam = (out["cams"] if kind == params.attention_type
+                           else out["cams_all"][kind]).float()
+                    if params.patch_attn_refine:
+                        if kind == params.attention_type:
+                            raw = to_working(cam, flipped)
+                            raw_total = raw if raw_total is None else raw_total + raw
+                        self.sync()
+                        start = time.perf_counter()
+                        cam = refine_cam_with_spatch_affinity(
+                            cam, s[:, 0], affinity, output=logits,
+                            pos_thr=0.5, alpha=0.85, steps=10, is_logit=True)
+                        self.sync()
+                        refine_ms += (time.perf_counter() - start) * 1000
+                    cam = to_working(cam, flipped)
+                    totals[kind] = cam if totals[kind] is None else totals[kind] + cam
                 scores.append(torch.sigmoid(logits))
+                cls_scores.append(torch.sigmoid(out["cls_logits"].float()))
+                patch_scores.append(torch.sigmoid(out["patch_logits"].float()))
+                # Token t is superpixel label t in every branch (resizing and flipping keep ids).
+                tokens.append(out["token_cls"].float())
+                token_mask = out["token_mask"][0]
         self.sync()
-        return (total[0], None if raw_total is None else raw_total[0],
-                torch.stack(scores).mean(0)[0], refine_ms)
+        mean = lambda values: torch.stack(values).mean(0)[0]
+        return {"cam": totals[params.attention_type][0],
+                "raw": None if raw_total is None else raw_total[0],
+                "types": {kind: total[0] for kind, total in totals.items()},
+                "scores": mean(scores), "cls_scores": mean(cls_scores),
+                "patch_scores": mean(patch_scores), "token_cls": mean(tokens),
+                "token_mask": token_mask, "refine_ms": refine_ms}
 
     def run(self, image, include, directory, model_id=None, params=None):
         params = params or InferenceParams()
@@ -204,11 +253,12 @@ class SegmentationEngine:
         spix = get_spix_label(np.asarray(working), num_components=loaded.spec.num_sp_tokens)
         spix = spix.astype(np.int64)
         mark = lap("superpixels", mark)
-        cam, raw_cam, scores, refine_ms = self.cams(loaded, working, spix, params)
+        out = self.cams(loaded, working, spix, params, all_types="cam" in include)
+        cam, raw_cam, scores = out["cam"], out["raw"], out["scores"]
         mark = lap("forward", mark)
-        timings["forward"] = round(timings["forward"] - refine_ms, 2)
+        timings["forward"] = round(timings["forward"] - out["refine_ms"], 2)
         if params.patch_attn_refine:
-            timings["refine"] = round(refine_ms, 2)
+            timings["refine"] = round(out["refine_ms"], 2)
 
         detected = [int(i) for i in torch.nonzero(scores > params.cls_threshold).flatten()]
         normalized = {index: minmax(cam[index]) for index in detected}
@@ -248,13 +298,19 @@ class SegmentationEngine:
             data["confidence"] = {"measure": "top1_minus_top2", "mean": float(confidence.mean()),
                                   "low_threshold": LOW_CONFIDENCE,
                                   "low_ratio": float((confidence < LOW_CONFIDENCE).mean())}
+        data["token_classes"] = save_token_classes(
+            out["token_cls"], out["token_mask"], spix, image, directory / "token-classes.png",
+            loaded.classes)
+        artifacts["token_classes"] = "token-classes.png"
         mark = lap("save_outputs", mark)
         class_scores = {i + 1: float(scores[i]) for i in range(len(scores))}
         data.update(
             detected_classes=[{"id": i + 1, "name": loaded.classes[i + 1],
                                "score": class_scores[i + 1]} for i in detected],
-            class_scores=[{"id": i, "name": loaded.classes[i], "score": s}
-                          for i, s in class_scores.items()],
+            class_scores=[{"id": i + 1, "name": loaded.classes[i + 1], "score": class_scores[i + 1],
+                           "cls_score": float(out["cls_scores"][i]),
+                           "patch_score": float(out["patch_scores"][i])}
+                          for i in range(len(scores))],
             timings_ms=timings)
         stages = {"segmentation": {
             "status": "completed", "used_for_prediction": True,
@@ -286,9 +342,17 @@ class SegmentationEngine:
                             save_heat(minmax(raw_cam[index]), image,
                                       directory / f"cam-raw-{index + 1}.png")
                             artifacts[f"raw_class_{index + 1}"] = f"cam-raw-{index + 1}.png"
+                        for kind, typed in out["types"].items():
+                            if kind == params.attention_type:
+                                continue  # identical to cam-<id>.png
+                            save_heat(minmax(typed[index]), image,
+                                      directory / f"cam-{kind}-{index + 1}.png")
+                            artifacts[f"{kind}_class_{index + 1}"] = f"cam-{kind}-{index + 1}.png"
                     stage.update(method=f"drcformer_{params.attention_type}_cam",
                                  source="detected_classes",
                                  data={"class_ids": [i + 1 for i in detected],
+                                       "attention_type": params.attention_type,
+                                       "types": list(out["types"]),
                                        "refined": raw_cam is not None}, artifacts=artifacts)
                 stage["status"] = "completed"
             except Exception:

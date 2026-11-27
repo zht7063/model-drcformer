@@ -82,35 +82,59 @@ export function color(id) {
   return `rgb(${r},${g},${b})`;
 }
 
+export const ATTENTION_LABELS = { fused: "融合（fused）", patchcam: "PatchCAM", mct: "MCT" };
+
 /**
- * Result views in display order: prediction outputs, pixel confidence, SLIC, then one CAM per
- * detected class. A view with `compare` shows that image instead of the original on the left:
- * refined CAMs are paired with the same class before superpixel-affinity refinement.
+ * Result views in display order. Each view is `{ id, label, panels: [{ label, url }] }`: one
+ * panel is shown next to the original image, two or three panels replace it side by side.
+ * Order: prediction outputs, pixel confidence, superpixel classes, SLIC, then per detected
+ * class its CAM (before/after refinement when refined) and the three CAM types.
  */
 export function resultViews(result, classNames = {}) {
   if (!result) return [];
+  const one = (id, label, url) => ({ id, label, panels: [{ label, url }] });
   const views = [
-    { id: "overlay_url", label: "叠加图", url: result.outputs.overlay_url },
-    { id: "colored_url", label: "彩色分割", url: result.outputs.colored_url },
-    { id: "mask_url", label: "类别掩码", url: result.outputs.mask_url },
+    one("overlay_url", "叠加图", result.outputs.overlay_url),
+    one("colored_url", "彩色分割", result.outputs.colored_url),
+    one("mask_url", "类别掩码", result.outputs.mask_url),
   ];
-  const confidence = result.stages?.segmentation?.artifacts?.confidence_url;
-  if (confidence) views.push({ id: "confidence", label: "像素置信度", url: confidence });
+  const seg = result.stages?.segmentation || {};
+  if (seg.artifacts?.confidence_url)
+    views.push(one("confidence", "像素置信度", seg.artifacts.confidence_url));
+  if (seg.artifacts?.token_classes_url) {
+    const view = one("token_classes", "超像素类别", seg.artifacts.token_classes_url);
+    view.legend = (seg.data?.token_classes?.classes || []).filter((c) => c.id);
+    views.push(view);
+  }
   const slic = result.stages?.slic?.artifacts || {};
-  if (slic.boundary_url) views.push({ id: "slic_boundary", label: "超像素边界", url: slic.boundary_url });
-  if (slic.regions_url) views.push({ id: "slic_regions", label: "超像素区域", url: slic.regions_url });
-  const cams = result.stages?.cam?.artifacts || {};
+  if (slic.boundary_url) views.push(one("slic_boundary", "超像素边界", slic.boundary_url));
+  if (slic.regions_url) views.push(one("slic_regions", "超像素区域", slic.regions_url));
+  const cam = result.stages?.cam || {};
+  const cams = cam.artifacts || {};
+  const selected = cam.data?.attention_type;
   for (const [key, url] of Object.entries(cams)) {
     const id = Number(key.match(/^class_(\d+)_url$/)?.[1]);
-    if (!id) continue; // raw_class_<id>_url entries are attached to their refined view below
+    if (!id) continue; // raw_ and per-type entries are attached to this class below
     const name = classNames[id] ?? id;
     const raw = cams[`raw_class_${id}_url`];
     views.push(
       raw
-        ? { id: `cam_${id}`, label: `注意力 · ${name}（细化后）`, url,
-            compare: { label: `注意力 · ${name}（细化前）`, url: raw } }
-        : { id: `cam_${id}`, label: `注意力 · ${name}`, url },
+        ? { id: `cam_${id}`, label: `注意力 · ${name} · 细化前后`, panels: [
+            { label: `细化前`, url: raw }, { label: `细化后`, url }] }
+        : one(`cam_${id}`, `注意力 · ${name}`, url),
     );
+    const types = Object.keys(ATTENTION_LABELS)
+      .map((kind) => ({ kind, url: kind === selected ? url : cams[`${kind}_class_${id}_url`] }))
+      .filter((t) => t.url);
+    if (selected && types.length > 1)
+      views.push({
+        id: `cam_types_${id}`,
+        label: `注意力 · ${name} · 三种 CAM${cam.data?.refined ? "（均已细化）" : ""}`,
+        panels: types.map((t) => ({
+          label: ATTENTION_LABELS[t.kind] + (t.kind === selected ? "（当前）" : ""),
+          url: t.url,
+        })),
+      });
   }
   return views;
 }

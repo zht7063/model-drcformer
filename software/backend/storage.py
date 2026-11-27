@@ -8,9 +8,11 @@ import uuid
 from pathlib import Path
 
 REQUEST_ID = re.compile(r"^[0-9a-f]{32}$")
-ARTIFACTS = frozenset({"mask.png", "colored.png", "overlay.png", "confidence.png", "result.json"} | {
+ARTIFACTS = frozenset({"mask.png", "colored.png", "overlay.png", "confidence.png",
+                       "token-classes.png", "result.json"} | {
     f"slic-{name}" for name in ("labels.npy", "regions.png", "boundary.png")
-} | {f"cam-{prefix}{class_id}.png" for prefix in ("", "raw-") for class_id in range(1, 81)})
+} | {f"cam-{prefix}{class_id}.png" for prefix in ("", "raw-", "fused-", "patchcam-", "mct-")
+     for class_id in range(1, 81)})
 
 
 class ResultStore:

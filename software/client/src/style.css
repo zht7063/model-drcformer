@@ -475,6 +475,75 @@ hr {
   background: var(--primary);
   min-width: 1px;
 }
+.view-column {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.view-caption {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.legend-item.inline {
+  gap: 4px;
+}
+.mode-switch {
+  float: right;
+  display: inline-flex;
+  border: 1px solid var(--frame);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.mode-switch button {
+  border: 0;
+  border-radius: 0;
+  padding: 1px 8px;
+  font-size: 11px;
+  min-height: 0;
+  background: var(--surface);
+  color: var(--muted);
+}
+.mode-switch button.active {
+  background: var(--primary);
+  color: white;
+}
+.branch-key {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  margin: -2px 0 4px;
+}
+.branch-key i {
+  width: 10px;
+  height: 6px;
+  margin-left: 6px;
+}
+.branch-key i:first-child {
+  margin-left: 0;
+}
+.cls {
+  background: #e08e2b !important;
+}
+.patch {
+  background: #2a9d8f !important;
+}
+.score-track.split {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  background: transparent;
+}
+.score-track.split i {
+  height: 4px;
+  border-radius: 1px;
+}
 .compare {
   flex: 1;
   min-height: 0;
@@ -633,4 +702,7 @@ hr {
   * {
     transition: none !important;
   }
+}
+.compare.triple figure {
+  flex-basis: 33.3%;
 }
