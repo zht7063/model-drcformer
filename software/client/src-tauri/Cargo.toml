@@ -1,6 +1,6 @@
 [package]
 name = "drcformer-client"
-version = "0.1.1"
+version = "0.1.2"
 description = "DRCFormer 弱监督语义分割桌面客户端"
 edition = "2021"
 rust-version = "1.82"
