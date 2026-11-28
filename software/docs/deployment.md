@@ -16,6 +16,7 @@ cp software/.env.example software/.env   # software/.env 已被 Git 忽略
 - `SEG_MODELS`：JSON 列表，每项 `{"id", "checkpoint", "num_sp_tokens"}`，第一项为默认模型。checkpoint 为 `main.py` 训练输出的 `checkpoint.pth`（仅含 `model` 权重，以 `weights_only=True` 加载）；VOC（20 类）或 COCO（80 类）由权重自动识别。`num_sp_tokens` 必须与训练时 `--num-sp-tokens` 一致。所有模型启动时一次性加载并常驻显存。
 - `SEG_DEVICE`：`cuda:0`（默认单卡 4090），也支持 `cpu`。
 - `SEG_MAX_INFERENCE_SIDE`：推理最长边，默认 512。
+- `SEG_GT_DIR`：可选，VOC 2012 语义分割掩码目录（用于推理时按上传文件名自动命中 `<stem>.png` 并启用超像素-GT 增强/抑制，默认未配置即关闭）。可直接指向掩码目录（如 `.../voc2012/SegmentationClass` 或 `.../voc2012/SegmentationClassAug`），也可指向 VOC 根目录（存在 `SegmentationClass` / `SegmentationClassAug` 子目录时按 `SegmentationClass`、`SegmentationClassAug` 顺序查找）。
 - 其余上传、像素、队列、TTL 限制同 `.env.example`。
 
 检查配置（不加载模型、不探测 GPU）：

@@ -81,7 +81,8 @@ def create_app(settings=None, engine_factory=None):
     if engine_factory is None:
         def engine_factory():
             from software.backend.engine import SegmentationEngine
-            return SegmentationEngine(settings.models, settings.device, settings.max_inference_side)
+            return SegmentationEngine(settings.models, settings.device, settings.max_inference_side,
+                                      gt_dir=settings.gt_dir)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -143,12 +144,13 @@ def create_app(settings=None, engine_factory=None):
             ("max_upload_bytes", "max_pixels", "max_inference_side", "result_ttl_seconds",
              "upload_timeout_seconds", "queue_capacity")}}
 
-    def process(data, include, model_id, params):
+    def process(data, include, model_id, params, filename=None):
         started = time.perf_counter()
         image = decode_image(data, settings.max_pixels)
         request_id, directory = store.create()
         try:
-            result = app.state.engine.run(image, include, directory, model_id, params)
+            result = app.state.engine.run(image, include, directory, model_id, params,
+                                          filename=filename)
             result["duration_ms"] = round((time.perf_counter() - started) * 1000, 2)
             result = store.publish(request_id, result)
             LOGGER.info("request=%s duration_ms=%s stages=%s", request_id,
@@ -205,6 +207,7 @@ def create_app(settings=None, engine_factory=None):
             upload = form.get("image")
             if not isinstance(upload, UploadFile):
                 raise HTTPException(400, "image_file_required")
+            filename = upload.filename
             data = await upload.read(settings.max_upload_bytes + 1)
             if len(data) > settings.max_upload_bytes:
                 raise HTTPException(413, "upload_limit")
@@ -223,7 +226,7 @@ def create_app(settings=None, engine_factory=None):
             except (TypeError, ValidationError):
                 raise HTTPException(400, "invalid_params")
         future = asyncio.get_running_loop().run_in_executor(
-            app.state.executor, process, data, set(include), model_id, params)
+            app.state.executor, process, data, set(include), model_id, params, filename)
         try:
             # A disconnected caller must not release capacity while its GPU job still runs.
             return await asyncio.shield(future)

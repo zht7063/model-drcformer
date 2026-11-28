@@ -30,10 +30,27 @@ def parse_models(value):
     return specs
 
 
+def resolve_gt_dirs(gt_dir: Path | None) -> tuple[Path, ...]:
+    """Return mask lookup directories in priority order for a configured SEG_GT_DIR.
+
+    Supports pointing directly at a mask folder (e.g. SegmentationClass or
+    SegmentationClassAug) or at a VOC root containing those subdirectories,
+    searching SegmentationClass before SegmentationClassAug.
+    """
+    if gt_dir is None:
+        return ()
+    subdirs = tuple(
+        sub for name in ("SegmentationClass", "SegmentationClassAug")
+        if (sub := gt_dir / name).is_dir()
+    )
+    return subdirs if subdirs else (gt_dir,)
+
+
 @dataclass(frozen=True)
 class Settings:
     models: tuple = (ModelSpec("drcformer", OUTPUTS / "default" / "checkpoint.pth"),)
     results_dir: Path = OUTPUTS / "server_results"
+    gt_dir: Path | None = None
     api_key: str = field(default="", repr=False)
     device: str = "cuda:0"
     max_upload_bytes: int = 10 * 1024 * 1024
@@ -76,6 +93,8 @@ class Settings:
                 if not value:
                     raise ValueError("SEG_RESULTS_DIR must not be empty")
                 values[name] = Path(value).expanduser().resolve()
+            elif name == "gt_dir":
+                values[name] = Path(value).expanduser().resolve() if value.strip() else None
             elif isinstance(getattr(defaults, name), int):
                 values[name] = int(value)
             else:

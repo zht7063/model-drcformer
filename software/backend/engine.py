@@ -1,12 +1,14 @@
 """Resident DRCFormer checkpoints and the multi-scale CAM -> mask inference path.
 
-Mirrors engine.generate_attention_maps_ms, minus everything that needs ground truth:
-image-level labels are replaced by the model's own class scores (sigmoid > cls_threshold),
-and the GT-overlap superpixel amplify/suppress step is skipped.
+Mirrors engine.generate_attention_maps_ms: image-level labels are replaced by the
+model's own class scores (sigmoid > cls_threshold); when SEG_GT_DIR is configured,
+loaded.dataset == "VOC12", cam_gt_enhance is True, and the uploaded filename matches
+a VOC mask `<stem>.png`, the superpixel-GT overlap amplify/suppress step is applied.
 """
 import hashlib
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import sys
 import time
 
@@ -24,11 +26,13 @@ from engine import JET_CMAP, refine_cam_with_spatch_affinity  # noqa: E402
 from evaluation import COCO_CATEGORIES, VOC_CATEGORIES  # noqa: E402
 from models import drcformer  # noqa: E402
 
+from software.backend.config import resolve_gt_dirs  # noqa: E402
 from software.backend.schemas import InferenceParams  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
 MEAN = torch.tensor([0.485, 0.456, 0.406])[:, None, None]
 STD = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
+VOC_STEM = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def sha256(path):
@@ -131,6 +135,147 @@ def crf_labels(image, probs, iters):
     return np.argmax(np.array(crf.inference(iters)).reshape(channels, height, width), 0)
 
 
+def extract_voc_stem(filename: str | None) -> str | None:
+    """Extract a traversal-safe stem from an uploaded filename, or return None."""
+    if not filename or "\x00" in filename:
+        return None
+    normalized = filename.replace("\\", "/")
+    if normalized.endswith("/"):
+        return None
+    parts = PurePosixPath(normalized).parts
+    if not parts or ".." in parts:
+        return None
+    stem = PurePosixPath(parts[-1]).stem
+    if not stem or not VOC_STEM.fullmatch(stem):
+        return None
+    return stem
+
+
+def find_voc_gt_mask(gt_dir: Path | None, filename: str | None) -> tuple[str, Path] | None:
+    """Locate `<stem>.png` inside configured VOC GT directories, guarding against traversal."""
+    if gt_dir is None:
+        return None
+    stem = extract_voc_stem(filename)
+    if stem is None:
+        return None
+    for directory in resolve_gt_dirs(gt_dir):
+        candidate = directory / f"{stem}.png"
+        try:
+            resolved_dir = directory.resolve()
+            resolved_file = candidate.resolve()
+        except OSError:
+            continue
+        if resolved_file.parent != resolved_dir or not resolved_file.is_file():
+            continue
+        return stem, resolved_file
+    return None
+
+
+def load_voc_gt_mask(path: Path) -> torch.Tensor | None:
+    """Read a VOC palette/indexed PNG mask as a 2D int64 tensor."""
+    with Image.open(path) as mask_img:
+        arr = np.asarray(mask_img)
+    if arr.ndim == 3 and arr.shape[2] == 1:
+        arr = arr[:, :, 0]
+    if arr.ndim != 2:
+        LOGGER.warning("Ignoring non-2D GT mask %s with shape %s", path, arr.shape)
+        return None
+    return torch.from_numpy(arr.astype(np.int64, copy=True))
+
+
+def clamp_gt_params(
+    gamma: float = 0.45,
+    theta: float = 0.38,
+    alpha: float = 0.06,
+    beta: float = 0.08,
+) -> dict[str, float]:
+    """Clamp superpixel-GT parameters to [0, 1] and enforce theta <= gamma."""
+    alpha = max(0.0, min(1.0, float(alpha)))
+    beta = max(0.0, min(1.0, float(beta)))
+    gamma = max(0.0, min(1.0, float(gamma)))
+    theta = max(0.0, min(1.0, float(theta)))
+    if theta > gamma:
+        theta, gamma = gamma, theta
+    return {"gamma": gamma, "theta": theta, "alpha": alpha, "beta": beta}
+
+
+def apply_superpixel_gt_enhancement(
+    cam: torch.Tensor,
+    spix: torch.Tensor | np.ndarray,
+    gt_mask: torch.Tensor,
+    active_classes: list[int] | tuple[int, ...],
+    *,
+    gamma: float = 0.45,
+    theta: float = 0.38,
+    alpha: float = 0.06,
+    beta: float = 0.08,
+    ann_label_offset: int = 1,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Apply superpixel-GT overlap amplification/suppression to active class CAMs.
+
+    Mirrors src/drcformer/engine.py::generate_attention_maps_ms (L818-L890):
+    In single-image inference there is no image-level GT `target_vec`, so `active_classes`
+    comes from `scores > cls_threshold` (matching the classes used for mask/CAM outputs).
+    For each `cls_ind`, GT foreground class is `seg_id = cls_ind + ann_label_offset` (VOC
+    void label 255 never equals a foreground `seg_id`, so it is ignored in `pos_mask` while
+    superpixel total pixel counts `cnt_total` match the training/eval implementation).
+    """
+    eff = clamp_gt_params(gamma=gamma, theta=theta, alpha=alpha, beta=beta)
+    if not active_classes:
+        return cam, eff
+
+    Hc, Wc = cam.shape[-2:]
+    device, dtype = cam.device, cam.dtype
+
+    ann = gt_mask.to(device=device)
+    if ann.dim() == 3 and ann.shape[0] == 1:
+        ann = ann.squeeze(0)
+    if ann.dim() != 2:
+        raise RuntimeError(f"Unexpected annotation dim: {ann.dim()}")
+    if (ann.shape[-2], ann.shape[-1]) != (Hc, Wc):
+        ann = F.interpolate(
+            ann.unsqueeze(0).unsqueeze(0).float(), size=(Hc, Wc), mode="nearest"
+        ).squeeze(0).squeeze(0).long()
+    else:
+        ann = ann.long()
+
+    sp = spix if isinstance(spix, torch.Tensor) else torch.from_numpy(spix)
+    sp = sp.to(device=device)
+    if sp.dim() == 3 and sp.shape[0] == 1:
+        sp = sp.squeeze(0)
+    if (sp.shape[-2], sp.shape[-1]) != (Hc, Wc):
+        sp = F.interpolate(
+            sp.unsqueeze(0).unsqueeze(0).float(), size=(Hc, Wc), mode="nearest"
+        ).squeeze(0).squeeze(0).long()
+    else:
+        sp = sp.long()
+
+    sp_flat = sp.view(-1)
+    T = int(sp_flat.max().item()) + 1
+    cnt_total = torch.bincount(sp_flat, minlength=T).to(dtype).clamp_min(1.0)
+
+    out = cam.clone()
+    for cls_ind in active_classes:
+        seg_id = cls_ind + ann_label_offset
+        pos_mask = (ann == seg_id).view(-1)
+        if pos_mask.any():
+            cnt_pos = torch.bincount(sp_flat[pos_mask], minlength=T).to(dtype)
+        else:
+            cnt_pos = torch.zeros(T, dtype=dtype, device=device)
+        ratio = cnt_pos / cnt_total
+
+        scale_sp = torch.ones(T, dtype=dtype, device=device)
+        if eff["alpha"] > 0:
+            scale_sp = torch.where(ratio >= eff["gamma"], 1.0 + eff["alpha"], scale_sp)
+        if eff["beta"] > 0:
+            scale_sp = torch.where(ratio <= eff["theta"], 1.0 - eff["beta"], scale_sp)
+
+        scale_map = scale_sp[sp_flat].view(Hc, Wc)
+        out[cls_ind] = out[cls_ind] * scale_map
+
+    return out, eff
+
+
 class LoadedModel:
     def __init__(self, spec, device):
         self.spec = spec
@@ -150,9 +295,10 @@ class LoadedModel:
 
 
 class SegmentationEngine:
-    def __init__(self, specs, device="cuda", max_inference_side=512):
+    def __init__(self, specs, device="cuda", max_inference_side=512, gt_dir=None):
         self.device = device
         self.max_inference_side = max_inference_side
+        self.gt_dir = Path(gt_dir).expanduser().resolve() if gt_dir is not None else None
         self.models = {spec.id: LoadedModel(spec, device) for spec in specs}
         self.default_model = specs[0].id
 
@@ -234,7 +380,7 @@ class SegmentationEngine:
                 "patch_scores": mean(patch_scores), "token_cls": mean(tokens),
                 "token_mask": token_mask, "refine_ms": refine_ms}
 
-    def run(self, image, include, directory, model_id=None, params=None):
+    def run(self, image, include, directory, model_id=None, params=None, filename=None):
         params = params or InferenceParams()
         loaded = self.models[model_id or self.default_model]
         started = time.perf_counter()
@@ -255,12 +401,57 @@ class SegmentationEngine:
         mark = lap("superpixels", mark)
         out = self.cams(loaded, working, spix, params, all_types="cam" in include)
         cam, raw_cam, scores = out["cam"], out["raw"], out["scores"]
+        cam_types = out["types"]
         mark = lap("forward", mark)
         timings["forward"] = round(timings["forward"] - out["refine_ms"], 2)
         if params.patch_attn_refine:
             timings["refine"] = round(out["refine_ms"], 2)
 
+        # Single-image inference uses detected classes (scores > cls_threshold) in place of
+        # dataset target_vec so segmentation, CRF and exported CAMs stay consistent.
         detected = [int(i) for i in torch.nonzero(scores > params.cls_threshold).flatten()]
+        gt_enhanced = False
+        gt_matched_id = None
+        eff_gt_params = clamp_gt_params(
+            gamma=params.cam_sp_gamma,
+            theta=params.cam_sp_theta,
+            alpha=params.cam_amp_alpha,
+            beta=params.cam_amp_beta,
+        )
+        if self.gt_dir is not None and params.cam_gt_enhance and loaded.dataset == "VOC12":
+            matched = find_voc_gt_mask(self.gt_dir, filename)
+            if matched is not None:
+                stem, gt_path = matched
+                try:
+                    gt_mask = load_voc_gt_mask(gt_path)
+                except Exception:
+                    LOGGER.warning("Failed to load VOC GT mask %s", gt_path, exc_info=True)
+                    gt_mask = None
+                if gt_mask is not None:
+                    gt_matched_id = stem
+                    if detected:
+                        cam, eff_gt_params = apply_superpixel_gt_enhancement(
+                            cam, spix, gt_mask, detected,
+                            gamma=params.cam_sp_gamma,
+                            theta=params.cam_sp_theta,
+                            alpha=params.cam_amp_alpha,
+                            beta=params.cam_amp_beta,
+                        )
+                        updated_types = {}
+                        for kind, typed in cam_types.items():
+                            if kind == params.attention_type:
+                                updated_types[kind] = cam
+                            else:
+                                updated_types[kind], _ = apply_superpixel_gt_enhancement(
+                                    typed, spix, gt_mask, detected,
+                                    gamma=params.cam_sp_gamma,
+                                    theta=params.cam_sp_theta,
+                                    alpha=params.cam_amp_alpha,
+                                    beta=params.cam_amp_beta,
+                                )
+                        cam_types = updated_types
+                        gt_enhanced = True
+
         normalized = {index: minmax(cam[index]) for index in detected}
         # Channel 0 is background at bg_threshold; channel k is foreground class detected[k-1].
         probs = torch.stack([torch.full_like(cam[0], params.bg_threshold)]
@@ -342,7 +533,7 @@ class SegmentationEngine:
                             save_heat(minmax(raw_cam[index]), image,
                                       directory / f"cam-raw-{index + 1}.png")
                             artifacts[f"raw_class_{index + 1}"] = f"cam-raw-{index + 1}.png"
-                        for kind, typed in out["types"].items():
+                        for kind, typed in cam_types.items():
                             if kind == params.attention_type:
                                 continue  # identical to cam-<id>.png
                             save_heat(minmax(typed[index]), image,
@@ -350,10 +541,16 @@ class SegmentationEngine:
                             artifacts[f"{kind}_class_{index + 1}"] = f"cam-{kind}-{index + 1}.png"
                     stage.update(method=f"drcformer_{params.attention_type}_cam",
                                  source="detected_classes",
+                                 parameters={"gt_enhanced": gt_enhanced,
+                                             "gt_matched_id": gt_matched_id,
+                                             **eff_gt_params},
                                  data={"class_ids": [i + 1 for i in detected],
                                        "attention_type": params.attention_type,
-                                       "types": list(out["types"]),
-                                       "refined": raw_cam is not None}, artifacts=artifacts)
+                                       "types": list(cam_types),
+                                       "refined": raw_cam is not None,
+                                       "gt_enhanced": gt_enhanced,
+                                       "gt_matched_id": gt_matched_id},
+                                 artifacts=artifacts)
                 stage["status"] = "completed"
             except Exception:
                 LOGGER.exception("auxiliary stage failed: %s", name)

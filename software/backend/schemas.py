@@ -25,6 +25,11 @@ class InferenceParams(BaseModel):
     bg_threshold: float = Field(default=0.39, ge=0, le=1)
     crf: bool = False
     crf_iters: int = Field(default=5, ge=1, le=20)
+    cam_gt_enhance: bool = True
+    cam_sp_gamma: float = Field(default=0.45, ge=0, le=1)
+    cam_sp_theta: float = Field(default=0.38, ge=0, le=1)
+    cam_amp_alpha: float = Field(default=0.06, ge=0, le=1)
+    cam_amp_beta: float = Field(default=0.08, ge=0, le=1)
 
     @field_validator("scales")
     @classmethod
